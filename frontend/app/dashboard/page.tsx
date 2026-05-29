@@ -113,32 +113,44 @@ export default function DashboardPage() {
 
         <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
           <h2 className="text-2xl font-semibold">Mark attendance</h2>
-          <p
-            className={sessionActive ? "text-green-400" : "text-zinc-400"}
-          >
-            {sessionActive
-              ? "Attendance session is open — scan your face below"
-              : "Waiting for teacher to start attendance"}
-          </p>
 
-          <Webcam
-            ref={webcamRef}
-            screenshotFormat="image/jpeg"
-            className="rounded-3xl w-full border border-zinc-700"
-          />
+          {!sessionActive && (
+            <p className="text-zinc-400">
+              Waiting for your teacher to start the attendance session. This page
+              will show the face scanner when the session opens.
+            </p>
+          )}
 
-          <button
-            type="button"
-            onClick={handleMarkAttendance}
-            disabled={loading || !sessionActive || alreadyMarked}
-            className="bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed transition px-8 py-4 rounded-2xl font-semibold"
-          >
-            {alreadyMarked
-              ? "Already marked this session"
-              : loading
-                ? "Verifying…"
-                : "Mark attendance with face scan"}
-          </button>
+          {sessionActive && alreadyMarked && (
+            <p className="text-green-400 font-medium">
+              You have already marked attendance for this session.
+            </p>
+          )}
+
+          {sessionActive && !alreadyMarked && (
+            <>
+              <p className="text-green-400">
+                Attendance session is open — scan your face below
+              </p>
+
+              <Webcam
+                ref={webcamRef}
+                screenshotFormat="image/jpeg"
+                className="rounded-3xl w-full border border-zinc-700"
+              />
+
+              <button
+                type="button"
+                onClick={handleMarkAttendance}
+                disabled={loading}
+                className="bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed transition px-8 py-4 rounded-2xl font-semibold"
+              >
+                {loading
+                  ? "Verifying…"
+                  : "Mark attendance with face scan"}
+              </button>
+            </>
+          )}
         </div>
 
         {status && (

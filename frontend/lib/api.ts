@@ -45,13 +45,22 @@ export type StudentProfile = {
 export type AttendanceStatus = {
   active: boolean;
   started_at: string | null;
+  teacher_ip?: string | null;
   marked_count: number;
   marked_students: {
     email: string;
     name: string;
     marked_at: string;
+    ip_match?: boolean;
+    student_ip?: string | null;
+    has_snapshot?: boolean;
   }[];
 };
+
+export function attendanceSnapshotUrl(email: string): string {
+  const base = getApiBaseUrl();
+  return `${base}/attendance/snapshot/${encodeURIComponent(email)}`;
+}
 
 export async function registerStudent(name: string, scans: Blob[]) {
   const formData = new FormData();

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  attendanceSnapshotUrl,
   getAttendanceStatus,
   listStudents,
   startAttendance,
@@ -82,8 +83,8 @@ export default function AdminPage() {
     message.includes("stopped") ||
     message.includes("marked");
 
-  const markedEmails = new Set(
-    status?.marked_students.map((student) => student.email) ?? []
+  const markedByEmail = new Map(
+    status?.marked_students.map((student) => [student.email, student]) ?? []
   );
 
   return (
@@ -117,6 +118,11 @@ export default function AdminPage() {
               {status?.started_at && sessionActive && (
                 <p className="text-sm text-zinc-500 mt-1">
                   Started {new Date(status.started_at).toLocaleString()}
+                </p>
+              )}
+              {status?.teacher_ip && (
+                <p className="text-sm text-zinc-400 mt-1 font-mono">
+                  Teacher IP: {status.teacher_ip}
                 </p>
               )}
             </div>
@@ -169,19 +175,47 @@ export default function AdminPage() {
               {status.marked_students.length === 0 ? (
                 <p className="text-zinc-500">No students have marked yet.</p>
               ) : (
-                <ul className="space-y-2">
+                <ul className="space-y-3">
                   {status.marked_students.map((student) => (
                     <li
                       key={student.email}
-                      className="bg-zinc-800 px-4 py-3 rounded-xl text-sm flex flex-wrap gap-x-4 gap-y-1"
+                      className="bg-zinc-800 px-4 py-3 rounded-xl text-sm flex flex-wrap items-start gap-x-4 gap-y-2"
                     >
+                      {student.has_snapshot && (
+                        <img
+                          src={attendanceSnapshotUrl(student.email)}
+                          alt={`${student.name} at mark attendance`}
+                          className="w-24 h-24 rounded-xl object-cover border border-zinc-600 shrink-0"
+                        />
+                      )}
                       <span className="font-medium text-white">
                         {student.name}
                       </span>
-                      <span className="text-zinc-400">{student.email}</span>
                       <span className="text-zinc-500">
                         {new Date(student.marked_at).toLocaleString()}
                       </span>
+                      {status.teacher_ip && (
+                        <span
+                          className={`font-mono text-xs ${
+                            student.ip_match === false
+                              ? "text-red-400"
+                              : "text-zinc-400"
+                          }`}
+                        >
+                          Teacher IP: {status.teacher_ip}
+                        </span>
+                      )}
+                      {student.student_ip && (
+                        <span
+                          className={`font-mono text-xs ${
+                            student.ip_match === false
+                              ? "text-red-400"
+                              : "text-zinc-400"
+                          }`}
+                        >
+                          Student IP: {student.student_ip}
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -199,27 +233,26 @@ export default function AdminPage() {
           {students.length === 0 ? (
             <p className="text-zinc-500">No student accounts yet.</p>
           ) : (
-            <table className="w-full text-left text-sm min-w-[640px]">
+            <table className="w-full text-left text-sm min-w-[760px]">
               <thead>
                 <tr className="text-zinc-400 border-b border-zinc-800">
                   <th className="py-3 pr-4 font-medium">Name</th>
-                  <th className="py-3 pr-4 font-medium">Student ID</th>
                   <th className="py-3 pr-4 font-medium">Face</th>
                   <th className="py-3 pr-4 font-medium">Registered at</th>
-                  <th className="py-3 font-medium">This session</th>
+                  <th className="py-3 pr-4 font-medium">Snapshot</th>
+                  <th className="py-3 pr-4 font-medium">This session</th>
+                  <th className="py-3 font-medium">IPs</th>
                 </tr>
               </thead>
               <tbody>
-                {students.map((student) => (
+                {students.map((student) => {
+                  const marked = markedByEmail.get(student.email);
+                  return (
                   <tr
                     key={student.email}
                     className="border-b border-zinc-800/80 last:border-0"
                   >
                     <td className="py-3 pr-4 text-white">{student.name}</td>
-                    <td className="py-3 pr-4 font-mono text-zinc-300 text-xs">
-                      {student.student_id ??
-                        student.email.split("@")[0].slice(0, 8)}
-                    </td>
                     <td className="py-3 pr-4">
                       <span
                         className={
@@ -240,8 +273,21 @@ export default function AdminPage() {
                           ).toLocaleString()
                         : "—"}
                     </td>
-                    <td className="py-3">
-                      {markedEmails.has(student.email) ? (
+                    <td className="py-3 pr-4">
+                      {marked?.has_snapshot ? (
+                        <img
+                          src={attendanceSnapshotUrl(student.email)}
+                          alt={`${student.name} webcam at mark attendance`}
+                          className="w-16 h-16 rounded-lg object-cover border border-zinc-600"
+                        />
+                      ) : marked ? (
+                        <span className="text-zinc-500 text-xs">—</span>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4">
+                      {marked ? (
                         <span className="text-green-400">Present</span>
                       ) : sessionActive ? (
                         <span className="text-zinc-500">Not yet</span>
@@ -249,8 +295,41 @@ export default function AdminPage() {
                         <span className="text-zinc-600">—</span>
                       )}
                     </td>
+                    <td className="py-3 font-mono text-xs">
+                      {marked ? (
+                        <div className="space-y-1">
+                          {status?.teacher_ip && (
+                            <div
+                              className={
+                                marked.ip_match === false
+                                  ? "text-red-400"
+                                  : "text-zinc-400"
+                              }
+                            >
+                              Teacher: {status.teacher_ip}
+                            </div>
+                          )}
+                          {marked.student_ip ? (
+                            <div
+                              className={
+                                marked.ip_match === false
+                                  ? "text-red-400"
+                                  : "text-zinc-400"
+                              }
+                            >
+                              Student: {marked.student_ip}
+                            </div>
+                          ) : (
+                            <div className="text-zinc-500">Student: —</div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}

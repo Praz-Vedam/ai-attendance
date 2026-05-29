@@ -6,8 +6,9 @@ import json
 import time
 from typing import Annotated, Dict, List, Optional, Tuple
 
-from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from student_store import (
     create_session,
@@ -92,11 +93,53 @@ print("SilentFace models loaded")
 
 attendance_active = False
 attendance_started_at = None
+attendance_session_ip: Optional[str] = None
 attendance_records = []
 
 SIMILARITY_THRESHOLD = 0.45
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 MIN_SIGNUP_SCANS = 1
+
+
+def get_client_ip(request: Request) -> Optional[str]:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return None
+
+
+def ips_match(admin_ip: Optional[str], student_ip: Optional[str]) -> bool:
+    if not admin_ip or not student_ip:
+        return True
+    return admin_ip == student_ip
+
+
+def marked_student_public(record: dict) -> dict:
+    payload = {
+        "email": record["email"],
+        "name": record["name"],
+        "marked_at": record["marked_at"],
+        "ip_match": record.get("ip_match", True),
+        "student_ip": record.get("student_ip"),
+    }
+    if record.get("snapshot"):
+        payload["has_snapshot"] = True
+    return payload
+
+
+def attendance_status_public() -> dict:
+    return {
+        "active": attendance_active,
+        "started_at": attendance_started_at,
+        "teacher_ip": attendance_session_ip,
+        "marked_count": len(attendance_records),
+        "marked_students": [
+            marked_student_public(record)
+            for record in attendance_records
+        ],
+    }
 
 
 def student_public_profile(student: Dict) -> Dict:
@@ -422,8 +465,8 @@ async def register_face(
 
 
 @app.post("/attendance/start")
-def start_attendance():
-    global attendance_active, attendance_started_at, attendance_records
+def start_attendance(request: Request):
+    global attendance_active, attendance_started_at, attendance_records, attendance_session_ip
 
     if attendance_active:
         return {
@@ -434,6 +477,7 @@ def start_attendance():
 
     attendance_active = True
     attendance_started_at = datetime.now(timezone.utc).isoformat()
+    attendance_session_ip = get_client_ip(request)
     attendance_records = []
 
     return {
@@ -455,36 +499,30 @@ def stop_attendance():
 
     attendance_active = False
 
+    payload = attendance_status_public()
     return {
         "success": True,
         "message": "Attendance session stopped",
-        "marked_count": len(attendance_records),
-        "marked_students": [
-            {
-                "email": record["email"],
-                "name": record["name"],
-                "marked_at": record["marked_at"],
-            }
-            for record in attendance_records
-        ],
+        "marked_count": payload["marked_count"],
+        "marked_students": payload["marked_students"],
+        "teacher_ip": payload["teacher_ip"],
     }
 
 
 @app.get("/attendance/status")
 def attendance_status():
-    return {
-        "active": attendance_active,
-        "started_at": attendance_started_at,
-        "marked_count": len(attendance_records),
-        "marked_students": [
-            {
-                "email": record["email"],
-                "name": record["name"],
-                "marked_at": record["marked_at"],
-            }
-            for record in attendance_records
-        ],
-    }
+    return attendance_status_public()
+
+
+@app.get("/attendance/snapshot/{email}")
+def attendance_snapshot(email: str):
+    for record in attendance_records:
+        if record["email"] == email:
+            snapshot = record.get("snapshot")
+            if snapshot:
+                return Response(content=snapshot, media_type="image/jpeg")
+            break
+    raise HTTPException(status_code=404, detail="Snapshot not found")
 
 
 @app.get("/students/me/status")
@@ -509,6 +547,7 @@ def student_status(student: dict = Depends(require_student)):
 
 @app.post("/students/me/mark-attendance")
 async def mark_attendance(
+    request: Request,
     file: UploadFile = File(...),
     student: dict = Depends(require_student),
 ):
@@ -535,12 +574,17 @@ async def mark_attendance(
         return result
 
     marked_at = datetime.now(timezone.utc).isoformat()
+    student_ip = get_client_ip(request)
+    ip_match = ips_match(attendance_session_ip, student_ip)
 
     attendance_records.append({
         "email": email,
         "name": student["name"],
         "marked_at": marked_at,
         "similarity": result["similarity"],
+        "student_ip": student_ip,
+        "ip_match": ip_match,
+        "snapshot": image_bytes,
     })
 
     return {
@@ -550,6 +594,7 @@ async def mark_attendance(
         "similarity": result["similarity"],
         "spoof_confidence": result["spoof_confidence"],
         "marked_at": marked_at,
+        "ip_match": ip_match,
         "student": student_public_profile(student),
     }
 
