@@ -11,15 +11,25 @@ if (!API_BASE_URL && process.env.NODE_ENV === "production") {
   );
 }
 
-export const api = axios.create({
-  baseURL: API_BASE_URL,
-});
+export const api = axios.create();
 
 api.interceptors.request.use((config) => {
+  config.baseURL = getApiBaseUrl();
+
   const token = getAuthToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+
+  try {
+    const host = new URL(config.baseURL).hostname;
+    if (host.includes("ngrok")) {
+      config.headers["ngrok-skip-browser-warning"] = "true";
+    }
+  } catch {
+    /* ignore */
+  }
+
   return config;
 });
 
