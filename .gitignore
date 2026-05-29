@@ -1,0 +1,14 @@
+backend/venv/
+backend/data/*
+!backend/data/.gitkeep
+frontend/node_modules/
+frontend/.next/
+__pycache__/
+*.pyc
+.env
+.env.local
+.env.development.local
+.env*.local
+!.env.example
+backend/.env
+.DS_Store

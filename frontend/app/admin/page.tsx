@@ -1,0 +1,288 @@
+"use client";
+
+import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
+
+import {
+  getAttendanceStatus,
+  listStudents,
+  startAttendance,
+  stopAttendance,
+  type AttendanceStatus,
+  type StudentProfile,
+} from "@/lib/api";
+
+export default function AdminPage() {
+  const [status, setStatus] = useState<AttendanceStatus | null>(null);
+  const [students, setStudents] = useState<StudentProfile[]>([]);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [polling, setPolling] = useState(true);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const [attendance, roster] = await Promise.all([
+        getAttendanceStatus(),
+        listStudents(),
+      ]);
+      setStatus(attendance);
+      setStudents(roster);
+      setMessage("");
+    } catch {
+      setMessage("Could not reach the attendance API. Is the backend running?");
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    if (!polling) return;
+
+    const interval = setInterval(refreshStatus, 4000);
+    return () => clearInterval(interval);
+  }, [polling, refreshStatus]);
+
+  const handleStart = async () => {
+    setLoading(true);
+    setMessage("");
+
+    try {
+      const data = await startAttendance();
+      setMessage(data.message);
+      await refreshStatus();
+    } catch {
+      setMessage("Failed to start attendance session");
+    }
+
+    setLoading(false);
+  };
+
+  const handleStop = async () => {
+    setLoading(true);
+    setMessage("");
+
+    try {
+      const data = await stopAttendance();
+      setMessage(
+        `${data.message}${data.marked_count !== undefined ? ` — ${data.marked_count} student(s) marked` : ""}`
+      );
+      await refreshStatus();
+    } catch {
+      setMessage("Failed to stop attendance session");
+    }
+
+    setLoading(false);
+  };
+
+  const sessionActive = status?.active ?? false;
+  const successMessage =
+    message.includes("started") ||
+    message.includes("stopped") ||
+    message.includes("marked");
+
+  const markedEmails = new Set(
+    status?.marked_students.map((student) => student.email) ?? []
+  );
+
+  return (
+    <main className="min-h-screen bg-black text-white px-6 py-10">
+      <div className="max-w-5xl mx-auto space-y-8">
+        <div>
+          <Link
+            href="/"
+            className="text-zinc-400 hover:text-white text-sm mb-4 inline-block"
+          >
+            ← Home
+          </Link>
+          <h1 className="text-4xl font-bold mb-2">Teacher / Admin</h1>
+          <p className="text-zinc-400">
+            Start or stop the attendance window and view enrolled students by
+            name and face registration status.
+          </p>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div>
+              <h2 className="text-2xl font-semibold mb-1">Session status</h2>
+              <p
+                className={`text-lg font-medium ${
+                  sessionActive ? "text-green-400" : "text-zinc-400"
+                }`}
+              >
+                {sessionActive ? "Attendance open" : "Attendance closed"}
+              </p>
+              {status?.started_at && sessionActive && (
+                <p className="text-sm text-zinc-500 mt-1">
+                  Started {new Date(status.started_at).toLocaleString()}
+                </p>
+              )}
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-zinc-400">
+              <input
+                type="checkbox"
+                checked={polling}
+                onChange={(e) => setPolling(e.target.checked)}
+                className="rounded"
+              />
+              Auto-refresh
+            </label>
+          </div>
+
+          <div className="flex flex-wrap gap-4">
+            <button
+              type="button"
+              onClick={handleStart}
+              disabled={loading || sessionActive}
+              className="bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed transition px-8 py-4 rounded-2xl font-semibold text-lg"
+            >
+              Start attendance
+            </button>
+
+            <button
+              type="button"
+              onClick={handleStop}
+              disabled={loading || !sessionActive}
+              className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed transition px-8 py-4 rounded-2xl font-semibold text-lg"
+            >
+              Stop attendance
+            </button>
+
+            <button
+              type="button"
+              onClick={refreshStatus}
+              disabled={loading}
+              className="bg-zinc-700 hover:bg-zinc-600 transition px-6 py-4 rounded-2xl font-semibold"
+            >
+              Refresh
+            </button>
+          </div>
+
+          {status && (
+            <div className="pt-4 border-t border-zinc-800">
+              <h3 className="text-lg font-semibold mb-3">
+                Marked this session ({status.marked_count})
+              </h3>
+              {status.marked_students.length === 0 ? (
+                <p className="text-zinc-500">No students have marked yet.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {status.marked_students.map((student) => (
+                    <li
+                      key={student.email}
+                      className="bg-zinc-800 px-4 py-3 rounded-xl text-sm flex flex-wrap gap-x-4 gap-y-1"
+                    >
+                      <span className="font-medium text-white">
+                        {student.name}
+                      </span>
+                      <span className="text-zinc-400">{student.email}</span>
+                      <span className="text-zinc-500">
+                        {new Date(student.marked_at).toLocaleString()}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-4 overflow-x-auto">
+          <h2 className="text-2xl font-semibold">Student roster</h2>
+          <p className="text-zinc-400 text-sm">
+            Each student is identified by the name and face scans from signup.
+          </p>
+
+          {students.length === 0 ? (
+            <p className="text-zinc-500">No student accounts yet.</p>
+          ) : (
+            <table className="w-full text-left text-sm min-w-[640px]">
+              <thead>
+                <tr className="text-zinc-400 border-b border-zinc-800">
+                  <th className="py-3 pr-4 font-medium">Name</th>
+                  <th className="py-3 pr-4 font-medium">Student ID</th>
+                  <th className="py-3 pr-4 font-medium">Face</th>
+                  <th className="py-3 pr-4 font-medium">Registered at</th>
+                  <th className="py-3 font-medium">This session</th>
+                </tr>
+              </thead>
+              <tbody>
+                {students.map((student) => (
+                  <tr
+                    key={student.email}
+                    className="border-b border-zinc-800/80 last:border-0"
+                  >
+                    <td className="py-3 pr-4 text-white">{student.name}</td>
+                    <td className="py-3 pr-4 font-mono text-zinc-300 text-xs">
+                      {student.student_id ??
+                        student.email.split("@")[0].slice(0, 8)}
+                    </td>
+                    <td className="py-3 pr-4">
+                      <span
+                        className={
+                          student.face_registered
+                            ? "text-green-400"
+                            : "text-amber-400"
+                        }
+                      >
+                        {student.face_registered
+                          ? `Linked to ${student.name}`
+                          : "Pending"}
+                      </span>
+                    </td>
+                    <td className="py-3 pr-4 text-zinc-500">
+                      {student.face_registered_at
+                        ? new Date(
+                            student.face_registered_at
+                          ).toLocaleString()
+                        : "—"}
+                    </td>
+                    <td className="py-3">
+                      {markedEmails.has(student.email) ? (
+                        <span className="text-green-400">Present</span>
+                      ) : sessionActive ? (
+                        <span className="text-zinc-500">Not yet</span>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <p className="text-zinc-500 text-sm">
+          Students sign up at{" "}
+          <Link
+            href="/register-student"
+            className="text-blue-400 hover:text-blue-300"
+          >
+            /register-student
+          </Link>{" "}
+          (name + face scans), then sign in at{" "}
+          <Link href="/login" className="text-blue-400 hover:text-blue-300">
+            /login
+          </Link>{" "}
+          to mark attendance.
+        </p>
+
+        {message && (
+          <div
+            className={`w-fit px-8 py-5 rounded-2xl text-lg font-semibold border ${
+              successMessage
+                ? "bg-green-600/20 text-green-400 border-green-500"
+                : "bg-red-600/20 text-red-400 border-red-500"
+            }`}
+          >
+            {message}
+          </div>
+        )}
+      </div>
+    </main>
+  );
+}
