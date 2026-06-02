@@ -46,6 +46,7 @@ export type AttendanceStatus = {
   active: boolean;
   started_at: string | null;
   teacher_ip?: string | null;
+  expected_classroom?: string | null;
   marked_count: number;
   marked_students: {
     email: string;
@@ -56,6 +57,8 @@ export type AttendanceStatus = {
     has_snapshot?: boolean;
     location?: string;
     location_confidence?: number;
+    status?: string;
+    reason?: string | null;
   }[];
 };
 
@@ -130,12 +133,13 @@ export async function listStudents() {
   return data.students;
 }
 
-export async function startAttendance() {
+export async function startAttendance(classroom: string) {
   const { data } = await api.post<{
     success: boolean;
     message: string;
     started_at: string;
-  }>("/attendance/start");
+    classroom: string;
+  }>("/attendance/start", { classroom });
   return data;
 }
 

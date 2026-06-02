@@ -19,6 +19,7 @@ export default function AdminPage() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [polling, setPolling] = useState(true);
+  const [selectedClassroom, setSelectedClassroom] = useState("Classroom 1");
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -50,7 +51,7 @@ export default function AdminPage() {
     setMessage("");
 
     try {
-      const data = await startAttendance();
+      const data = await startAttendance(selectedClassroom);
       setMessage(data.message);
       await refreshStatus();
     } catch {
@@ -138,7 +139,23 @@ export default function AdminPage() {
             </label>
           </div>
 
-          <div className="flex flex-wrap gap-4">
+          <div className="flex flex-wrap gap-4 items-end">
+            <div>
+              <label className="block text-sm font-medium text-zinc-400 mb-2">
+                Select Classroom
+              </label>
+              <select
+                value={selectedClassroom}
+                onChange={(e) => setSelectedClassroom(e.target.value)}
+                disabled={sessionActive || loading}
+                className="bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-white disabled:opacity-40"
+              >
+                <option>Classroom 1</option>
+                <option>Classroom 2</option>
+                <option>Classroom 3</option>
+              </select>
+            </div>
+
             <button
               type="button"
               onClick={handleStart}
@@ -228,6 +245,20 @@ export default function AdminPage() {
                           </span>
                         </span>
                       )}
+                      {student.status && (
+                        <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                          student.status === "Present"
+                            ? "bg-green-900/30 text-green-400"
+                            : "bg-red-900/30 text-red-400"
+                        }`}>
+                          {student.status}
+                        </span>
+                      )}
+                      {student.reason && (
+                        <span className="text-red-400 text-xs">
+                          Reason: {student.reason}
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -253,9 +284,11 @@ export default function AdminPage() {
                   <th className="py-3 pr-4 font-medium">Registered at</th>
                   <th className="py-3 pr-4 font-medium">Snapshot</th>
                   <th className="py-3 pr-4 font-medium">This session</th>
-                  <th className="py-3 pr-4 font-medium">IPs</th>
-                  <th className="py-3 pr-4 font-medium">Location</th>
-                  <th className="py-3 font-medium">Confidence</th>
+                  <th className="py-3 pr-4 font-medium">Expected</th>
+                  <th className="py-3 pr-4 font-medium">Detected</th>
+                  <th className="py-3 pr-4 font-medium">Confidence</th>
+                  <th className="py-3 pr-4 font-medium">Status</th>
+                  <th className="py-3 font-medium">Reason</th>
                 </tr>
               </thead>
               <tbody>
@@ -309,34 +342,9 @@ export default function AdminPage() {
                         <span className="text-zinc-600">—</span>
                       )}
                     </td>
-                    <td className="py-3 font-mono text-xs">
-                      {marked ? (
-                        <div className="space-y-1">
-                          {status?.teacher_ip && (
-                            <div
-                              className={
-                                marked.ip_match === false
-                                  ? "text-red-400"
-                                  : "text-zinc-400"
-                              }
-                            >
-                              Teacher: {status.teacher_ip}
-                            </div>
-                          )}
-                          {marked.student_ip ? (
-                            <div
-                              className={
-                                marked.ip_match === false
-                                  ? "text-red-400"
-                                  : "text-zinc-400"
-                              }
-                            >
-                              Student: {marked.student_ip}
-                            </div>
-                          ) : (
-                            <div className="text-zinc-500">Student: —</div>
-                          )}
-                        </div>
+                    <td className="py-3 pr-4">
+                      {status?.expected_classroom ? (
+                        <span className="text-white">{status.expected_classroom}</span>
                       ) : (
                         <span className="text-zinc-600">—</span>
                       )}
@@ -350,11 +358,35 @@ export default function AdminPage() {
                         <span className="text-zinc-600">—</span>
                       )}
                     </td>
-                    <td className="py-3">
+                    <td className="py-3 pr-4">
                       {marked?.location_confidence !== undefined ? (
-                        <span className="text-white font-mono">
+                        <span className="text-white font-mono text-xs">
                           {(marked.location_confidence * 100).toFixed(2)}%
                         </span>
+                      ) : marked ? (
+                        <span className="text-zinc-500">—</span>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4">
+                      {marked?.status ? (
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          marked.status === "Present"
+                            ? "bg-green-900/30 text-green-400"
+                            : "bg-red-900/30 text-red-400"
+                        }`}>
+                          {marked.status}
+                        </span>
+                      ) : marked ? (
+                        <span className="text-zinc-500">—</span>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
+                    <td className="py-3">
+                      {marked?.reason ? (
+                        <span className="text-red-400 text-xs">{marked.reason}</span>
                       ) : marked ? (
                         <span className="text-zinc-500">—</span>
                       ) : (

@@ -9,6 +9,7 @@ from typing import Annotated, Dict, List, Optional, Tuple
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 from student_store import (
     create_session,
@@ -120,11 +121,16 @@ CLASS_NAMES = {
 attendance_active = False
 attendance_started_at = None
 attendance_session_ip: Optional[str] = None
+attendance_expected_classroom: Optional[str] = None
 attendance_records = []
 
 SIMILARITY_THRESHOLD = 0.45
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 MIN_SIGNUP_SCANS = 1
+
+
+class AttendanceStartRequest(BaseModel):
+    classroom: str
 
 
 def get_client_ip(request: Request) -> Optional[str]:
@@ -153,6 +159,8 @@ def marked_student_public(record: dict) -> dict:
         "location_confidence": record.get(
             "location_confidence"
         ),
+        "status": record.get("status", "Present"),
+        "reason": record.get("reason"),
     }
     if record.get("snapshot"):
         payload["has_snapshot"] = True
@@ -164,6 +172,7 @@ def attendance_status_public() -> dict:
         "active": attendance_active,
         "started_at": attendance_started_at,
         "teacher_ip": attendance_session_ip,
+        "expected_classroom": attendance_expected_classroom,
         "marked_count": len(attendance_records),
         "marked_students": [
             marked_student_public(record)
@@ -549,8 +558,11 @@ async def register_face(
 
 
 @app.post("/attendance/start")
-def start_attendance(request: Request):
-    global attendance_active, attendance_started_at, attendance_records, attendance_session_ip
+def start_attendance(
+    request: Request,
+    payload: AttendanceStartRequest,
+):
+    global attendance_active, attendance_started_at, attendance_records, attendance_session_ip, attendance_expected_classroom
 
     if attendance_active:
         return {
@@ -562,18 +574,20 @@ def start_attendance(request: Request):
     attendance_active = True
     attendance_started_at = datetime.now(timezone.utc).isoformat()
     attendance_session_ip = get_client_ip(request)
+    attendance_expected_classroom = payload.classroom
     attendance_records = []
 
     return {
         "success": True,
         "message": "Attendance session started",
         "started_at": attendance_started_at,
+        "classroom": attendance_expected_classroom,
     }
 
 
 @app.post("/attendance/stop")
 def stop_attendance():
-    global attendance_active, attendance_started_at
+    global attendance_active, attendance_started_at, attendance_expected_classroom
 
     if not attendance_active:
         return {
@@ -582,6 +596,7 @@ def stop_attendance():
         }
 
     attendance_active = False
+    attendance_expected_classroom = None
 
     payload = attendance_status_public()
     return {
@@ -665,6 +680,20 @@ async def mark_attendance(
         image_bytes
     )
 
+    detected_location = location_result["location"]
+
+    status = "Present"
+    reason = None
+
+    if detected_location == "Non-Classroom":
+        status = "Flagged"
+        reason = "Outside Classroom"
+    elif attendance_expected_classroom and (
+        detected_location != attendance_expected_classroom
+    ):
+        status = "Flagged"
+        reason = "Wrong Classroom"
+
     attendance_records.append({
         "email": email,
         "name": student["name"],
@@ -673,8 +702,10 @@ async def mark_attendance(
         "student_ip": student_ip,
         "ip_match": ip_match,
         "snapshot": image_bytes,
-        "location": location_result["location"],
+        "location": detected_location,
         "location_confidence": location_result["confidence"],
+        "status": status,
+        "reason": reason,
     })
 
     return {
@@ -685,8 +716,10 @@ async def mark_attendance(
         "spoof_confidence": result["spoof_confidence"],
         "marked_at": marked_at,
         "ip_match": ip_match,
-        "location": location_result["location"],
+        "location": detected_location,
         "location_confidence": location_result["confidence"],
+        "status": status,
+        "reason": reason,
         "student": student_public_profile(student),
     }
 
