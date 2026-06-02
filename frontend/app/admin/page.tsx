@@ -216,6 +216,18 @@ export default function AdminPage() {
                           Student IP: {student.student_ip}
                         </span>
                       )}
+                      {student.location && (
+                        <span className="text-zinc-400">
+                          Location: <span className="text-white font-medium">{student.location}</span>
+                        </span>
+                      )}
+                      {student.location_confidence !== undefined && (
+                        <span className="text-zinc-400">
+                          Confidence: <span className="text-white font-medium">
+                            {(student.location_confidence * 100).toFixed(2)}%
+                          </span>
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -241,7 +253,9 @@ export default function AdminPage() {
                   <th className="py-3 pr-4 font-medium">Registered at</th>
                   <th className="py-3 pr-4 font-medium">Snapshot</th>
                   <th className="py-3 pr-4 font-medium">This session</th>
-                  <th className="py-3 font-medium">IPs</th>
+                  <th className="py-3 pr-4 font-medium">IPs</th>
+                  <th className="py-3 pr-4 font-medium">Location</th>
+                  <th className="py-3 font-medium">Confidence</th>
                 </tr>
               </thead>
               <tbody>
@@ -323,6 +337,26 @@ export default function AdminPage() {
                             <div className="text-zinc-500">Student: —</div>
                           )}
                         </div>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4">
+                      {marked?.location ? (
+                        <span className="text-white">{marked.location}</span>
+                      ) : marked ? (
+                        <span className="text-zinc-500">—</span>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
+                    <td className="py-3">
+                      {marked?.location_confidence !== undefined ? (
+                        <span className="text-white font-mono">
+                          {(marked.location_confidence * 100).toFixed(2)}%
+                        </span>
+                      ) : marked ? (
+                        <span className="text-zinc-500">—</span>
                       ) : (
                         <span className="text-zinc-600">—</span>
                       )}

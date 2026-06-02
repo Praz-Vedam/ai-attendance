@@ -31,6 +31,9 @@ from PIL import Image
 import io
 import os
 from datetime import datetime, timezone
+import joblib
+import torch
+from transformers import AutoImageProcessor, AutoModel
 
 try:
     from dotenv import load_dotenv
@@ -91,6 +94,29 @@ anti_spoof = AntiSpoofPredict(0)
 
 print("SilentFace models loaded")
 
+print("Loading Location Classifier...")
+
+location_processor = AutoImageProcessor.from_pretrained(
+    "facebook/dinov2-base"
+)
+
+location_model = AutoModel.from_pretrained(
+    "facebook/dinov2-base"
+)
+
+location_classifier = joblib.load(
+    "location_model.pkl"
+)
+
+print("Location Classifier Loaded")
+
+CLASS_NAMES = {
+    0: "Classroom 1",
+    1: "Classroom 2",
+    2: "Classroom 3",
+    3: "Non-Classroom"
+}
+
 attendance_active = False
 attendance_started_at = None
 attendance_session_ip: Optional[str] = None
@@ -123,6 +149,10 @@ def marked_student_public(record: dict) -> dict:
         "marked_at": record["marked_at"],
         "ip_match": record.get("ip_match", True),
         "student_ip": record.get("student_ip"),
+        "location": record.get("location"),
+        "location_confidence": record.get(
+            "location_confidence"
+        ),
     }
     if record.get("snapshot"):
         payload["has_snapshot"] = True
@@ -239,6 +269,60 @@ def cosine_similarity(a, b):
         np.dot(a, b)
         / (np.linalg.norm(a) * np.linalg.norm(b))
     )
+
+
+def get_location_embedding(image_bytes):
+    image = Image.open(
+        io.BytesIO(image_bytes)
+    ).convert("RGB")
+
+    inputs = location_processor(
+        images=image,
+        return_tensors="pt"
+    )
+
+    with torch.no_grad():
+        outputs = location_model(
+            **inputs
+        )
+
+    embedding = (
+        outputs.last_hidden_state
+        .mean(dim=1)
+        .squeeze()
+        .numpy()
+    )
+
+    return embedding
+
+
+def detect_location(image_bytes):
+    embedding = get_location_embedding(
+        image_bytes
+    )
+
+    prediction = (
+        location_classifier
+        .predict([embedding])[0]
+    )
+
+    probabilities = (
+        location_classifier
+        .predict_proba([embedding])[0]
+    )
+
+    confidence = float(
+        max(probabilities)
+    )
+
+    location = CLASS_NAMES[
+        prediction
+    ]
+
+    return {
+        "location": location,
+        "confidence": confidence
+    }
 
 
 def average_embedding_from_images(image_bytes_list: List[bytes]):
@@ -577,6 +661,10 @@ async def mark_attendance(
     student_ip = get_client_ip(request)
     ip_match = ips_match(attendance_session_ip, student_ip)
 
+    location_result = detect_location(
+        image_bytes
+    )
+
     attendance_records.append({
         "email": email,
         "name": student["name"],
@@ -585,6 +673,8 @@ async def mark_attendance(
         "student_ip": student_ip,
         "ip_match": ip_match,
         "snapshot": image_bytes,
+        "location": location_result["location"],
+        "location_confidence": location_result["confidence"],
     })
 
     return {
@@ -595,6 +685,8 @@ async def mark_attendance(
         "spoof_confidence": result["spoof_confidence"],
         "marked_at": marked_at,
         "ip_match": ip_match,
+        "location": location_result["location"],
+        "location_confidence": location_result["confidence"],
         "student": student_public_profile(student),
     }
 

@@ -54,6 +54,8 @@ export type AttendanceStatus = {
     ip_match?: boolean;
     student_ip?: string | null;
     has_snapshot?: boolean;
+    location?: string;
+    location_confidence?: number;
   }[];
 };
 
