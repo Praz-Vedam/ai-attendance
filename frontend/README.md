@@ -190,4 +190,4 @@ Ensure route paths match the current backend (see [`../backend/README.md`](../ba
 
 ## Related
 
-- Backend setup and Python requirements: [`../backend/README.md`](../backend/README.md)
+- Backend setup and Python requirements: [`../backend/README.md`](../backend/README.md).

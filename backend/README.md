@@ -17,10 +17,11 @@ From the `backend/` directory (virtualenv activated):
 ```bash
 cd backend
 source venv/bin/activate   # Windows: venv\Scripts\activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000 --reload-exclude 'venv/*'
 ```
 
-- Health check: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- Health check: [http://127.0.0.1:8000](http://127.0.0.1:8000) — must return JSON before the frontend/ngrok tunnel will work
 - API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
 First startup can take a minute while InsightFace and anti-spoof models load.
@@ -116,6 +117,20 @@ Legacy/demo routes (`/verify-face`, `/start-attendance`, `/attendance-session`) 
 - **Vercel + laptop backend**: expose this API with an HTTPS tunnel (ngrok / Cloudflare); set `NEXT_PUBLIC_API_URL` on Vercel. Details: [`../frontend/README.md`](../frontend/README.md#deploy-frontend-on-vercel-backend-on-your-laptop).
 - **Face match threshold**: `SIMILARITY_THRESHOLD` in `main.py` (default `0.45`).
 - **Session TTL**: `SESSION_TTL_SECONDS` (default 7 days).
+
+## Troubleshooting
+
+### ngrok shows `502` on `OPTIONS /auth/login` (or other routes)
+
+That means the tunnel reached your machine but **nothing healthy is listening on port 8000** — not a CORS bug.
+
+1. In the terminal running uvicorn, confirm you see `Application startup complete` (first boot can take ~1 minute).
+2. Open [http://127.0.0.1:8000](http://127.0.0.1:8000) in a browser; you should get `{"message":"AI Proctoring Backend Running"}`.
+3. If startup failed with `No module named 'sklearn'`, run `pip install -r requirements.txt` and restart uvicorn.
+4. If `--reload` crashed after `pip install`, stop uvicorn and start again with `--reload-exclude 'venv/*'` (see command above).
+5. Only one process should bind port 8000 (`lsof -i :8000`).
+
+For **local** `npm run dev` only, you can point `NEXT_PUBLIC_API_URL` at `http://127.0.0.1:8000` in `.env.development.local` and skip ngrok.
 
 ## Related
 

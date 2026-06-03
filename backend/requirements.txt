@@ -21,6 +21,7 @@ scipy==1.13.1
 # Location detection
 transformers==4.36.2
 joblib==1.3.2
+scikit-learn==1.6.1
 
 # Transitive / support (pinned for reproducible installs)
 annotated-doc==0.0.4
