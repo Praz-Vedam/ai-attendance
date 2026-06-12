@@ -13,16 +13,21 @@ import {
   type StudentProfile,
 } from "@/lib/api";
 import { getAuthToken } from "@/lib/auth";
+import { useFaceDetection } from "@/lib/useFaceDetection";
 
 export default function DashboardPage() {
   const router = useRouter();
   const webcamRef = useRef<Webcam>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [sessionActive, setSessionActive] = useState(false);
   const [alreadyMarked, setAlreadyMarked] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+
+  const faceDetectionState = useFaceDetection(videoRef, "attendance");
 
   const loadProfile = useCallback(async () => {
     if (!getAuthToken()) {
@@ -133,16 +138,98 @@ export default function DashboardPage() {
                 Attendance session is open — scan your face below
               </p>
 
-              <Webcam
-                ref={webcamRef}
-                screenshotFormat="image/jpeg"
-                className="rounded-3xl w-full border border-zinc-700"
-              />
+              <div className="relative">
+                <Webcam
+                  ref={webcamRef}
+                  screenshotFormat="image/jpeg"
+                  className="rounded-3xl w-full border border-zinc-700 block"
+                  videoConstraints={{
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    facingMode: "user",
+                  }}
+                  onUserMedia={() => {
+                    if (webcamRef.current?.video) {
+                      videoRef.current = webcamRef.current.video;
+                      setCameraReady(true);
+                    }
+                  }}
+                />
+                {cameraReady && (
+                  <svg
+                    width="100%"
+                    height="100%"
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      pointerEvents: "none",
+                    }}
+                    viewBox="0 0 1280 720"
+                    preserveAspectRatio="none"
+                  >
+                    <defs>
+                      <style>{`
+                        .face-guide-oval {
+                          fill: none;
+                          stroke: ${
+                            faceDetectionState.aligned ? "#22c55e" : "#ef4444"
+                          };
+                          stroke-width: 3;
+                          opacity: 0.8;
+                        }
+                      `}</style>
+                    </defs>
+                    {/* Face oval guide */}
+                    <ellipse
+                      cx="640"
+                      cy="320"
+                      rx="160"
+                      ry="220"
+                      className="face-guide-oval"
+                    />
+                    {/* Shoulder guide */}
+                    <path
+                      d="M 300 500 Q 640 580 980 500 L 980 620 Q 640 650 300 620 Z"
+                      fill="none"
+                      stroke={
+                        faceDetectionState.aligned ? "#22c55e" : "#ef4444"
+                      }
+                      strokeWidth="3"
+                      opacity="0.8"
+                    />
+                    {/* Center crosshair */}
+                    <g
+                      stroke={
+                        faceDetectionState.aligned ? "#22c55e" : "#ef4444"
+                      }
+                      strokeWidth="2"
+                      opacity="0.4"
+                    >
+                      <line x1="600" y1="320" x2="680" y2="320" />
+                      <line x1="640" y1="280" x2="640" y2="360" />
+                    </g>
+                  </svg>
+                )}
+              </div>
+
+              {/* Face alignment status */}
+              <div className="text-center py-4">
+                {faceDetectionState.aligned ? (
+                  <p className="text-green-400 font-semibold text-lg">
+                    ✓ Face Aligned
+                  </p>
+                ) : (
+                  <p className="text-red-400 font-semibold text-lg">
+                    ⚠ {faceDetectionState.message}
+                  </p>
+                )}
+              </div>
 
               <button
                 type="button"
                 onClick={handleMarkAttendance}
-                disabled={loading}
+                disabled={loading || !faceDetectionState.aligned}
                 className="bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed transition px-8 py-4 rounded-2xl font-semibold"
               >
                 {loading

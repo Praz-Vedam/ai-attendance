@@ -31,6 +31,7 @@ import numpy as np
 from PIL import Image
 import io
 import os
+import math
 from datetime import datetime, timezone
 import joblib
 import torch
@@ -227,6 +228,62 @@ def get_embedding(image_bytes):
         return None
 
     return faces[0].embedding
+
+
+def estimate_pose_from_landmarks(face) -> Optional[dict]:
+    kps = getattr(face, "kps", None)
+    if kps is None or len(kps) < 5:
+        return None
+
+    left_eye = np.array(kps[0], dtype=np.float32)
+    right_eye = np.array(kps[1], dtype=np.float32)
+    nose = np.array(kps[2], dtype=np.float32)
+    left_mouth = np.array(kps[3], dtype=np.float32)
+    right_mouth = np.array(kps[4], dtype=np.float32)
+
+    eye_center = (left_eye + right_eye) / 2
+    mouth_center = (left_mouth + right_mouth) / 2
+    face_center = (eye_center + mouth_center) / 2
+    eye_distance = float(np.linalg.norm(right_eye - left_eye))
+
+    if eye_distance <= 0:
+        return None
+
+    roll = math.degrees(
+        math.atan2(
+            float(right_eye[1] - left_eye[1]),
+            float(right_eye[0] - left_eye[0]),
+        )
+    )
+
+    nose_offset = float(nose[0] - face_center[0]) / eye_distance
+    yaw = max(-35.0, min(35.0, nose_offset * 70.0))
+
+    return {
+        "yaw": float(yaw),
+        "roll": float(roll),
+        "landmarks": {
+            "left_eye": left_eye.tolist(),
+            "right_eye": right_eye.tolist(),
+            "nose": nose.tolist(),
+            "left_mouth": left_mouth.tolist(),
+            "right_mouth": right_mouth.tolist(),
+        },
+    }
+
+
+def get_face_pose(image_bytes):
+    image = Image.open(
+        io.BytesIO(image_bytes)
+    ).convert("RGB")
+
+    image_np = np.array(image)
+    faces = face_app.get(image_np)
+
+    if len(faces) == 0:
+        return None
+
+    return estimate_pose_from_landmarks(faces[0])
 
 
 def check_spoof(image_bytes):
