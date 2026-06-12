@@ -76,11 +76,7 @@ def _campus_id_from_auth(auth: Dict[str, Any]) -> Optional[int]:
         return None
 
 
-def _map_lms_status(ai_status: str) -> str:
-    if ai_status == "Present":
-        return "PRESENT"
-    if ai_status == "Flagged":
-        return "LATE"
+def _map_lms_status(_ai_status: str) -> str:
     return "PRESENT"
 
 
