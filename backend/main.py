@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from lms_attendance_routes import register_routes as register_lms_routes, router as lms_router
 from student_store import (
     create_session,
     create_student_with_face,
@@ -46,7 +47,15 @@ except ImportError:
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
+    "http://localhost:3003",
+    "http://127.0.0.1:3003",
     "http://192.168.20.54:3000",
+    "http://192.168.20.72:3003",
+    "https://blubber-dress-startle.ngrok-free.dev",
 ]
 
 # Vercel production + preview deployments (https://*.vercel.app)
@@ -816,3 +825,61 @@ def attendance_session():
         }
 
     return json.loads(session)
+
+
+def verify_lms_face(embedding: list, image_bytes: bytes) -> dict:
+    is_real, spoof_confidence = check_spoof(image_bytes)
+
+    if not is_real:
+        return {
+            "success": False,
+            "verified": False,
+            "message": "Spoof attack detected",
+            "spoof_confidence": spoof_confidence,
+        }
+
+    live_embedding = get_embedding(image_bytes)
+
+    if live_embedding is None:
+        return {
+            "success": False,
+            "message": "No face detected",
+        }
+
+    if not embedding:
+        return {
+            "success": False,
+            "message": "Face not registered for this account",
+        }
+
+    similarity = cosine_similarity(
+        np.array(embedding),
+        live_embedding,
+    )
+
+    verified = similarity > SIMILARITY_THRESHOLD
+
+    return {
+        "success": True,
+        "verified": bool(verified),
+        "similarity": float(similarity),
+        "spoof_confidence": spoof_confidence,
+        "message": (
+            "Identity verified"
+            if verified
+            else "Face does not match registered profile"
+        ),
+    }
+
+
+register_lms_routes(
+    lms_router,
+    get_client_ip=get_client_ip,
+    verify_lms_face=verify_lms_face,
+    average_embedding_from_images=average_embedding_from_images,
+    embedding_to_list=embedding_to_list,
+    detect_location=detect_location,
+    ips_match=ips_match,
+)
+
+app.include_router(lms_router)
