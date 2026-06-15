@@ -12,6 +12,7 @@ from local_db import kv_get, kv_set
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Annotated, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile, File, Form
@@ -20,6 +21,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from lms_attendance_routes import register_routes as register_lms_routes, router as lms_router
+from lms_client import close_lms_client, get_lms_client
 from student_store import (
     create_session,
     create_student_with_face,
@@ -64,11 +66,11 @@ DEFAULT_CORS_ORIGINS = [
     "https://student.vedam.org",
 ]
 
-# Vercel production + preview deployments (https://*.vercel.app)
-VERCEL_CORS_ORIGIN_REGEX = os.getenv(
-    "CORS_ORIGIN_REGEX",
-    r"https://.*\.vercel\.app",
+# Vercel previews + ngrok dev tunnels (https://*.vercel.app, https://*.ngrok-free.dev|app)
+DEFAULT_CORS_ORIGIN_REGEX = (
+    r"https://(.*\.vercel\.app|.*\.ngrok-free\.(dev|app))"
 )
+CORS_ORIGIN_REGEX = os.getenv("CORS_ORIGIN_REGEX", DEFAULT_CORS_ORIGIN_REGEX)
 
 
 def build_allowed_origins() -> list[str]:
@@ -89,7 +91,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    get_lms_client()
+    yield
+    await close_lms_client()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -115,7 +125,7 @@ async def log_incoming_requests(request: Request, call_next):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=build_allowed_origins(),
-    allow_origin_regex=VERCEL_CORS_ORIGIN_REGEX,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

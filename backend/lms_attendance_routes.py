@@ -12,14 +12,13 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from lms_client import (
+    LmsApiError,
     bulk_update_attendance,
-    get_active_face_session,
     get_attendance_records,
     get_face_embedding,
     get_face_status_by_email,
+    import_attendance,
     register_face_embedding,
-    start_face_session,
-    stop_face_session,
     validate_lms_token,
 )
 from lms_redis_store import (
@@ -57,6 +56,20 @@ def require_lms_token(
     token = authorization.removeprefix("Bearer ").strip()
     logger.info("[FE →] accessToken received: %s", token)
     return token
+
+
+async def require_lms_auth(token: str = Depends(require_lms_token)) -> Dict[str, Any]:
+    try:
+        return await validate_lms_token(token)
+    except LmsApiError as exc:
+        logger.warning("[LMS auth] %s (lms_status=%s)", exc, exc.lms_status)
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("[LMS auth] Unexpected error validating token")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not verify LMS token",
+        ) from exc
 
 
 def _public_mark(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -102,17 +115,13 @@ def register_routes(
     async def lms_register_face(
         files: List[UploadFile] = File(...),
         token: str = Depends(require_lms_token),
+        _auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
         if len(files) < MIN_SIGNUP_SCANS:
             return {
                 "success": False,
                 "message": f"At least {MIN_SIGNUP_SCANS} face scan is required",
             }
-
-        try:
-            await validate_lms_token(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
 
         image_bytes_list = [await upload.read() for upload in files]
         embedding = average_embedding_from_images(image_bytes_list)
@@ -137,29 +146,32 @@ def register_routes(
         request: Request,
         payload: LmsAttendanceStartRequest,
         token: str = Depends(require_lms_token),
+        auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
-        try:
-            auth = await validate_lms_token(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
-
         campus_id = _campus_id_from_auth(auth)
 
         try:
-            await start_face_session(token, payload.class_session_id, payload.classroom)
+            await import_attendance(token, payload.class_session_id)
         except ValueError as exc:
             return {"success": False, "message": str(exc)}
 
+        existing = get_session(payload.class_session_id)
+        already_active = bool(existing and existing.get("active"))
+
         session = init_session(
             payload.class_session_id,
-            classroom=payload.classroom,
+            classroom=payload.classroom or (existing or {}).get("classroom"),
             teacher_ip=get_client_ip(request),
             campus_id=campus_id,
         )
 
         return {
             "success": True,
-            "message": "Attendance session started",
+            "message": (
+                "Attendance session already active for this class session"
+                if already_active
+                else "Attendance session started"
+            ),
             "started_at": session.get("started_at"),
             "classroom": session.get("classroom"),
             "class_session_id": payload.class_session_id,
@@ -169,18 +181,9 @@ def register_routes(
     async def lms_stop_attendance(
         payload: LmsAttendanceSessionRequest,
         token: str = Depends(require_lms_token),
+        _auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
-        try:
-            await validate_lms_token(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
-
         marked = list_marks(payload.class_session_id)
-        try:
-            await stop_face_session(token, payload.class_session_id)
-        except ValueError as exc:
-            return {"success": False, "message": str(exc)}
-
         clear_session(payload.class_session_id)
 
         return {
@@ -194,12 +197,8 @@ def register_routes(
     async def lms_submit_attendance(
         payload: LmsAttendanceSessionRequest,
         token: str = Depends(require_lms_token),
+        auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
-        try:
-            auth = await validate_lms_token(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
-
         class_session_id = payload.class_session_id
         session = get_session(class_session_id)
         if not session:
@@ -250,7 +249,6 @@ def register_routes(
 
         try:
             await bulk_update_attendance(token, updates)
-            await stop_face_session(token, class_session_id)
         except ValueError as exc:
             return {"success": False, "message": str(exc)}
         except Exception:
@@ -269,13 +267,9 @@ def register_routes(
     @app_router.get("/attendance/status")
     async def lms_attendance_status(
         class_session_id: int = Query(...),
-        token: str = Depends(require_lms_token),
+        _token: str = Depends(require_lms_token),
     ):
-        try:
-            await validate_lms_token(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
-
+        # Redis-only status — no LMS round-trip (avoids 401s during polling).
         session = get_session(class_session_id)
         marks = list_marks(class_session_id)
 
@@ -304,12 +298,11 @@ def register_routes(
     async def lms_student_attendance_status(
         class_session_id: int = Query(...),
         token: str = Depends(require_lms_token),
+        auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
-        try:
-            auth = await validate_lms_token(token)
-            lms_session = await get_active_face_session(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
+        # Redis-only session state — keyed by class_session_id.
+        redis_session = get_session(class_session_id)
+        session_active = bool(redis_session and redis_session.get("active"))
 
         campus_id = _campus_id_from_auth(auth)
         person_detail = auth.get("personDetail") or {}
@@ -326,22 +319,12 @@ def register_routes(
             except Exception:
                 pass
 
-        active_lms_session_id = (
-            lms_session.get("classSessionId") if lms_session.get("active") else None
-        )
-        redis_session = get_session(class_session_id)
-        session_active_for_class = (
-            bool(lms_session.get("active"))
-            and active_lms_session_id == class_session_id
-            and bool(redis_session and redis_session.get("active"))
-        )
-
         already_marked = bool(email) and has_mark(class_session_id, email)
 
         return {
-            "attendance_active": session_active_for_class,
+            "attendance_active": session_active,
             "class_session_id": class_session_id,
-            "classroom": lms_session.get("classroom") if session_active_for_class else None,
+            "classroom": redis_session.get("classroom") if session_active else None,
             "already_marked": already_marked,
             "lms_status": lms_status,
         }
@@ -350,12 +333,8 @@ def register_routes(
     async def lms_attendance_roster(
         class_session_id: int = Query(...),
         token: str = Depends(require_lms_token),
+        auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
-        try:
-            auth = await validate_lms_token(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
-
         campus_id = _campus_id_from_auth(auth)
         if not campus_id:
             return {"success": False, "message": "Campus ID missing", "students": []}
@@ -404,29 +383,20 @@ def register_routes(
         file: UploadFile = File(...),
         class_session_id: int = Form(...),
         token: str = Depends(require_lms_token),
+        auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
         if not is_session_active(class_session_id):
             return {"success": False, "message": "Attendance session is not active"}
 
         try:
-            auth = await validate_lms_token(token)
             face_payload = await get_face_embedding(token)
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid LMS token")
+        except LmsApiError as exc:
+            logger.warning("[LMS] get_face_embedding failed: %s", exc)
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
         person_detail = auth.get("personDetail") or {}
         email = (face_payload.get("email") or person_detail.get("email") or "").lower()
         name = person_detail.get("name") or email
-
-        lms_session = await get_active_face_session(token)
-        if (
-            not lms_session.get("active")
-            or lms_session.get("classSessionId") != class_session_id
-        ):
-            return {
-                "success": False,
-                "message": "Attendance is not active for this class session",
-            }
 
         if not face_payload.get("hasFaceData"):
             return {
