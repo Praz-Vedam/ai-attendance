@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any, Dict, List, Optional
 
@@ -33,6 +34,7 @@ from lms_redis_store import (
 )
 
 router = APIRouter(prefix="/lms", tags=["lms"])
+logger = logging.getLogger(__name__)
 
 MIN_SIGNUP_SCANS = 1
 
@@ -50,8 +52,11 @@ def require_lms_token(
     authorization: Annotated[Optional[str], Header()] = None,
 ) -> str:
     if not authorization or not authorization.startswith("Bearer "):
+        logger.warning("[FE →] Missing or invalid Authorization header: %s", authorization)
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return authorization.removeprefix("Bearer ").strip()
+    token = authorization.removeprefix("Bearer ").strip()
+    logger.info("[FE →] accessToken received: %s", token)
+    return token
 
 
 def _public_mark(record: Dict[str, Any]) -> Dict[str, Any]:

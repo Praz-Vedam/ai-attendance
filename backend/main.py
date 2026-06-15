@@ -10,6 +10,7 @@ except ImportError:
 from local_db import kv_get, kv_set
 
 import json
+import logging
 import time
 from typing import Annotated, Dict, List, Optional, Tuple
 
@@ -83,7 +84,33 @@ def build_allowed_origins() -> list[str]:
     return origins
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+
 app = FastAPI()
+
+
+@app.middleware("http")
+async def log_incoming_requests(request: Request, call_next):
+    auth = request.headers.get("authorization", "")
+    access_token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else None
+    logging.getLogger("api").info(
+        "[FE →] %s %s | accessToken=%s",
+        request.method,
+        request.url.path,
+        access_token or "(none)",
+    )
+    response = await call_next(request)
+    logging.getLogger("api").info(
+        "[FE ←] %s %s -> %s",
+        request.method,
+        request.url.path,
+        response.status_code,
+    )
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
