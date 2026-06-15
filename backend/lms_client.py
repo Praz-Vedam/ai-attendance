@@ -7,11 +7,25 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-LMS_API_BASE = os.getenv("LMS_API_BASE", "http://127.0.0.1:9090").rstrip("/")
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+_DEFAULT_LMS_API_BASE = "https://unmixed-virtual-chihuahua.ngrok-free.dev"
+
+
+def _lms_api_base() -> str:
+    return os.getenv("LMS_API_BASE", _DEFAULT_LMS_API_BASE).rstrip("/")
 
 
 def _auth_headers(token: str) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"}
+    if "ngrok" in _lms_api_base():
+        headers["ngrok-skip-browser-warning"] = "true"
+    return headers
 
 
 def _unwrap_lms_response(payload: Dict[str, Any]) -> Any:
@@ -23,7 +37,7 @@ def _unwrap_lms_response(payload: Dict[str, Any]) -> Any:
 async def validate_lms_token(token: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
-            f"{LMS_API_BASE}/auth/detail",
+            f"{_lms_api_base()}/auth/detail",
             headers=_auth_headers(token),
         )
         response.raise_for_status()
@@ -33,7 +47,7 @@ async def validate_lms_token(token: str) -> Dict[str, Any]:
 async def get_face_embedding(token: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
-            f"{LMS_API_BASE}/person/face",
+            f"{_lms_api_base()}/person/face",
             headers=_auth_headers(token),
         )
         response.raise_for_status()
@@ -43,7 +57,7 @@ async def get_face_embedding(token: str) -> Dict[str, Any]:
 async def get_face_status_by_email(token: str, email: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
-            f"{LMS_API_BASE}/person/face/status/by-email",
+            f"{_lms_api_base()}/person/face/status/by-email",
             params={"email": email},
             headers=_auth_headers(token),
         )
@@ -54,7 +68,7 @@ async def get_face_status_by_email(token: str, email: str) -> Dict[str, Any]:
 async def register_face_embedding(token: str, embedding: List[float]) -> None:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.put(
-            f"{LMS_API_BASE}/person/face",
+            f"{_lms_api_base()}/person/face",
             headers={**_auth_headers(token), "Content-Type": "application/json"},
             json={"embedding": embedding},
         )
@@ -70,7 +84,7 @@ async def start_face_session(
 ) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"{LMS_API_BASE}/attendance/face-session/start",
+            f"{_lms_api_base()}/attendance/face-session/start",
             headers={**_auth_headers(token), "Content-Type": "application/json"},
             json={"classSessionId": class_session_id, "classroom": classroom},
         )
@@ -84,7 +98,7 @@ async def start_face_session(
 async def stop_face_session(token: str, class_session_id: int) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"{LMS_API_BASE}/attendance/face-session/stop",
+            f"{_lms_api_base()}/attendance/face-session/stop",
             headers={**_auth_headers(token), "Content-Type": "application/json"},
             json={"classSessionId": class_session_id},
         )
@@ -98,7 +112,7 @@ async def stop_face_session(token: str, class_session_id: int) -> Dict[str, Any]
 async def get_active_face_session(token: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
-            f"{LMS_API_BASE}/attendance/face-session/active",
+            f"{_lms_api_base()}/attendance/face-session/active",
             headers=_auth_headers(token),
         )
         response.raise_for_status()
@@ -114,7 +128,7 @@ async def get_attendance_records(
 ) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(
-            f"{LMS_API_BASE}/attendance",
+            f"{_lms_api_base()}/attendance",
             params={
                 "campusId": campus_id,
                 "classSessionId": class_session_id,
@@ -138,7 +152,7 @@ async def bulk_update_attendance(
 ) -> None:
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.put(
-            f"{LMS_API_BASE}/attendance/bulk",
+            f"{_lms_api_base()}/attendance/bulk",
             headers={**_auth_headers(token), "Content-Type": "application/json"},
             json=updates,
         )

@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 from local_db import kv_get, kv_set
 
 import json
@@ -37,13 +44,6 @@ import joblib
 import torch
 from transformers import AutoImageProcessor, AutoModel
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass
-
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -53,9 +53,14 @@ DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:3002",
     "http://localhost:3003",
     "http://127.0.0.1:3003",
-    "http://192.168.20.54:3000",
-    "http://192.168.20.72:3003",
-    "https://blubber-dress-startle.ngrok-free.dev",
+    "http://192.168.20.76:3000",
+    "http://192.168.20.76:3003",
+    "https://dev-admin.vedam.org",
+    "https://uat-admin.vedam.org",
+    "https://admin.vedam.org",
+    "https://dev-student.vedam.org",
+    "https://uat-student.vedam.org",
+    "https://student.vedam.org",
 ]
 
 # Vercel production + preview deployments (https://*.vercel.app)
