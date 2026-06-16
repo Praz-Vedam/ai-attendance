@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from lms_attendance_routes import register_routes as register_lms_routes, router as lms_router
 from lms_client import close_lms_client, get_lms_client
+from ml_config import ENABLE_ANTI_SPOOF, ENABLE_LOCATION_DETECTION, location_attendance_status
 from student_store import (
     create_session,
     create_student_with_face,
@@ -56,8 +57,6 @@ DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:3002",
     "http://localhost:3003",
     "http://127.0.0.1:3003",
-    "http://192.168.20.76:3000",
-    "http://192.168.20.76:3003",
     "https://dev-admin.vedam.org",
     "https://uat-admin.vedam.org",
     "https://admin.vedam.org",
@@ -66,9 +65,19 @@ DEFAULT_CORS_ORIGINS = [
     "https://student.vedam.org",
 ]
 
-# Vercel previews + ngrok dev tunnels (https://*.vercel.app, https://*.ngrok-free.dev|app)
+# Vercel previews, ngrok/Cloudflare tunnels, and local/LAN dev (any port).
 DEFAULT_CORS_ORIGIN_REGEX = (
-    r"https://(.*\.vercel\.app|.*\.ngrok-free\.(dev|app))"
+    r"https://("
+    r".*\.vercel\.app"
+    r"|.*\.ngrok(-free)?\.(dev|app|io)"
+    r"|.*\.trycloudflare\.com"
+    r")"
+    r"|http://("
+    r"localhost|127\.0\.0\.1"
+    r"|192\.168\.\d{1,3}\.\d{1,3}"
+    r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r")(:\d+)?"
 )
 CORS_ORIGIN_REGEX = os.getenv("CORS_ORIGIN_REGEX", DEFAULT_CORS_ORIGIN_REGEX)
 
@@ -138,29 +147,39 @@ face_app.prepare(ctx_id=-1)
 
 print("InsightFace models loaded")
 
-print("Loading SilentFace anti-spoofing models...")
+logging.info(
+    "ML flags: ENABLE_ANTI_SPOOF=%s ENABLE_LOCATION_DETECTION=%s",
+    ENABLE_ANTI_SPOOF,
+    ENABLE_LOCATION_DETECTION,
+)
 
 model_dir = "./resources/anti_spoof_models"
+anti_spoof: Optional[AntiSpoofPredict] = None
+location_processor = None
+location_model = None
+location_classifier = None
 
-anti_spoof = AntiSpoofPredict(0)
+if ENABLE_ANTI_SPOOF:
+    print("Loading SilentFace anti-spoofing models...")
+    anti_spoof = AntiSpoofPredict(0)
+    print("SilentFace models loaded")
+else:
+    print("Anti-spoof disabled (ENABLE_ANTI_SPOOF=false)")
 
-print("SilentFace models loaded")
-
-print("Loading Location Classifier...")
-
-location_processor = AutoImageProcessor.from_pretrained(
-    "facebook/dinov2-base"
-)
-
-location_model = AutoModel.from_pretrained(
-    "facebook/dinov2-base"
-)
-
-location_classifier = joblib.load(
-    "location_model.pkl"
-)
-
-print("Location Classifier Loaded")
+if ENABLE_LOCATION_DETECTION:
+    print("Loading Location Classifier...")
+    location_processor = AutoImageProcessor.from_pretrained(
+        "facebook/dinov2-base"
+    )
+    location_model = AutoModel.from_pretrained(
+        "facebook/dinov2-base"
+    )
+    location_classifier = joblib.load(
+        "location_model.pkl"
+    )
+    print("Location Classifier Loaded")
+else:
+    print("Location detection disabled (ENABLE_LOCATION_DETECTION=false)")
 
 CLASS_NAMES = {
     0: "Classroom 1",
@@ -281,6 +300,9 @@ def get_embedding(image_bytes):
 
 
 def check_spoof(image_bytes):
+    if not ENABLE_ANTI_SPOOF:
+        return True, 1.0
+
     image = Image.open(
         io.BytesIO(image_bytes)
     ).convert("RGB")
@@ -357,6 +379,12 @@ def get_location_embedding(image_bytes):
 
 
 def detect_location(image_bytes):
+    if not ENABLE_LOCATION_DETECTION:
+        return {
+            "location": None,
+            "confidence": None,
+        }
+
     embedding = get_location_embedding(
         image_bytes
     )
@@ -732,18 +760,10 @@ async def mark_attendance(
     )
 
     detected_location = location_result["location"]
-
-    status = "Present"
-    reason = None
-
-    if detected_location == "Non-Classroom":
-        status = "Flagged"
-        reason = "Outside Classroom"
-    elif attendance_expected_classroom and (
-        detected_location != attendance_expected_classroom
-    ):
-        status = "Flagged"
-        reason = "Wrong Classroom"
+    status, reason = location_attendance_status(
+        detected_location,
+        attendance_expected_classroom,
+    )
 
     attendance_records.append({
         "email": email,

@@ -21,6 +21,7 @@ from lms_client import (
     register_face_embedding,
     validate_lms_token,
 )
+from ml_config import location_attendance_status
 from lms_redis_store import (
     add_mark,
     clear_session,
@@ -417,14 +418,10 @@ def register_routes(
         detected_location = location_result["location"]
         expected_classroom = session.get("classroom")
 
-        status = "Present"
-        reason = None
-        if detected_location == "Non-Classroom":
-            status = "Flagged"
-            reason = "Outside Classroom"
-        elif expected_classroom and detected_location != expected_classroom:
-            status = "Flagged"
-            reason = "Wrong Classroom"
+        status, reason = location_attendance_status(
+            detected_location,
+            expected_classroom,
+        )
 
         marked_at = datetime.now(timezone.utc).isoformat()
         record = {
