@@ -34,6 +34,7 @@ def init_session(
     payload = {
         "class_session_id": class_session_id,
         "active": True,
+        "submitted": False,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "classroom": classroom,
         "teacher_ip": teacher_ip,
@@ -126,3 +127,22 @@ def deactivate_session(class_session_id: int) -> None:
         json.dumps(session).encode("utf-8"),
         ex=SESSION_TTL_SECONDS,
     )
+
+
+def mark_session_submitted(class_session_id: int) -> None:
+    """Close the live session but keep marks so students can still poll their status."""
+    session = get_session(class_session_id)
+    if not session:
+        return
+    session["active"] = False
+    session["submitted"] = True
+    session["submitted_at"] = datetime.now(timezone.utc).isoformat()
+    session["ended_at"] = session.get("ended_at") or datetime.now(timezone.utc).isoformat()
+    pipe = redis_client.pipeline()
+    pipe.set(
+        _session_key(class_session_id),
+        json.dumps(session).encode("utf-8"),
+        ex=SESSION_TTL_SECONDS,
+    )
+    pipe.expire(_marks_key(class_session_id), SESSION_TTL_SECONDS)
+    pipe.execute()

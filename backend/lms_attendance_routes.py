@@ -24,12 +24,14 @@ from lms_client import (
 from lms_redis_store import (
     add_mark,
     clear_session,
+    get_mark,
     get_session,
     get_snapshot,
     has_mark,
     init_session,
     is_session_active,
     list_marks,
+    mark_session_submitted,
 )
 
 router = APIRouter(prefix="/lms", tags=["lms"])
@@ -254,7 +256,7 @@ def register_routes(
         except Exception:
             return {"success": False, "message": "Failed to submit attendance to LMS"}
 
-        clear_session(class_session_id)
+        mark_session_submitted(class_session_id)
 
         return {
             "success": True,
@@ -286,6 +288,7 @@ def register_routes(
 
         return {
             "active": bool(session.get("active")),
+            "submitted": bool(session.get("submitted")),
             "started_at": session.get("started_at"),
             "teacher_ip": session.get("teacher_ip"),
             "expected_classroom": session.get("classroom"),
@@ -297,36 +300,28 @@ def register_routes(
     @app_router.get("/attendance/student-status")
     async def lms_student_attendance_status(
         class_session_id: int = Query(...),
-        token: str = Depends(require_lms_token),
+        _token: str = Depends(require_lms_token),
         auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
-        # Redis-only session state — keyed by class_session_id.
+        # Redis-only — session id is always class_session_id; no LMS attendance round-trip.
         redis_session = get_session(class_session_id)
         session_active = bool(redis_session and redis_session.get("active"))
+        session_submitted = bool(redis_session and redis_session.get("submitted"))
 
-        campus_id = _campus_id_from_auth(auth)
         person_detail = auth.get("personDetail") or {}
         email = (person_detail.get("email") or "").lower()
 
-        lms_status = None
-        if campus_id:
-            try:
-                records = await get_attendance_records(
-                    token, int(campus_id), class_session_id, scope="USER"
-                )
-                if records:
-                    lms_status = records[0].get("status")
-            except Exception:
-                pass
-
-        already_marked = bool(email) and has_mark(class_session_id, email)
+        mark = get_mark(class_session_id, email) if email else None
+        already_marked = mark is not None
 
         return {
             "attendance_active": session_active,
             "class_session_id": class_session_id,
-            "classroom": redis_session.get("classroom") if session_active else None,
+            "classroom": redis_session.get("classroom") if redis_session else None,
             "already_marked": already_marked,
-            "lms_status": lms_status,
+            "session_submitted": session_submitted,
+            "mark_status": mark.get("status") if mark else None,
+            "marked_at": mark.get("marked_at") if mark else None,
         }
 
     @app_router.get("/attendance/roster")

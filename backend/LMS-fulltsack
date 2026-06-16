@@ -1,0 +1,16 @@
+{
+    "folders": [
+        {
+            "path": "./"
+        },
+        {
+            "path": "../student-portal"
+        },
+        {
+            "path": "../admin-portal"
+        },
+        {
+            "path": "../lms"
+        }
+    ]
+}
