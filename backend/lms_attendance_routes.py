@@ -18,13 +18,16 @@ from lms_client import (
     get_face_embedding,
     get_face_status_by_email,
     import_attendance,
+    parse_face_embedding,
     register_face_embedding,
     validate_lms_token,
 )
-from ml_config import location_attendance_status
+from ml_config import DEFER_ML_REVIEW, location_attendance_status
 from lms_redis_store import (
     add_mark,
+    cache_face_embedding,
     clear_session,
+    get_cached_face_embedding,
     get_mark,
     get_session,
     get_snapshot,
@@ -34,6 +37,7 @@ from lms_redis_store import (
     list_marks,
     mark_session_submitted,
 )
+from session_review import schedule_session_review
 
 router = APIRouter(prefix="/lms", tags=["lms"])
 logger = logging.getLogger(__name__)
@@ -106,6 +110,7 @@ def register_routes(
     *,
     get_client_ip,
     verify_lms_face,
+    verify_face_match_only,
     average_embedding_from_images,
     embedding_to_list,
     detect_location,
@@ -141,6 +146,11 @@ def register_routes(
             return {"success": False, "message": str(exc)}
         except Exception:
             return {"success": False, "message": "Could not save face data to LMS"}
+
+        person_detail = _auth.get("personDetail") or {}
+        email = (person_detail.get("email") or "").lower()
+        if email:
+            cache_face_embedding(email, embedding_to_list(embedding))
 
         return {"success": True, "message": "Face registered successfully"}
 
@@ -212,42 +222,57 @@ def register_routes(
             return {"success": False, "message": "Campus ID is required to submit attendance"}
 
         marks = list_marks(class_session_id)
-        if not marks:
-            return {
-                "success": False,
-                "message": "No students marked attendance yet",
-            }
 
         try:
             attendance_rows = await get_attendance_records(token, int(campus_id), class_session_id)
         except Exception:
             return {"success": False, "message": "Could not load attendance records from LMS"}
 
-        email_to_id = {
-            row.get("email", "").lower(): row.get("attendanceId")
+        marked_by_email = {
+            (mark.get("email") or "").lower(): mark for mark in marks
+        }
+
+        roster_emails = {
+            (row.get("email") or "").lower()
             for row in attendance_rows
             if row.get("email") and row.get("attendanceId")
         }
 
         updates = []
         missing = []
-        for mark in marks:
-            email = (mark.get("email") or "").lower()
-            attendance_id = email_to_id.get(email)
-            if not attendance_id:
-                missing.append(email)
+        present_count = 0
+        absent_count = 0
+
+        for row in attendance_rows:
+            email = (row.get("email") or "").lower()
+            attendance_id = row.get("attendanceId")
+            if not email or not attendance_id:
                 continue
-            updates.append(
-                {
-                    "id": attendance_id,
-                    "status": _map_lms_status(mark.get("status", "Present")),
-                }
-            )
+
+            mark = marked_by_email.get(email)
+            if mark:
+                updates.append(
+                    {
+                        "id": attendance_id,
+                        "status": _map_lms_status(mark.get("status", "Present")),
+                    }
+                )
+                present_count += 1
+            else:
+                updates.append(
+                    {
+                        "id": attendance_id,
+                        "status": "ABSENT",
+                    }
+                )
+                absent_count += 1
+
+        missing = [email for email in marked_by_email if email not in roster_emails]
 
         if not updates:
             return {
                 "success": False,
-                "message": "No matching LMS attendance records for marked students",
+                "message": "No LMS attendance records found for this class session",
             }
 
         try:
@@ -259,12 +284,19 @@ def register_routes(
 
         mark_session_submitted(class_session_id)
 
+        if DEFER_ML_REVIEW:
+            schedule_session_review(class_session_id)
+
         return {
             "success": True,
-            "message": f"Submitted attendance for {len(updates)} student(s) to LMS",
-            "marked_count": len(updates),
+            "message": (
+                f"Submitted attendance to LMS — {present_count} present, {absent_count} absent"
+            ),
+            "marked_count": present_count,
+            "absent_count": absent_count,
             "missing_emails": missing,
             "marked_students": [_public_mark(record) for record in marks],
+            "review_status": "pending" if DEFER_ML_REVIEW else None,
         }
 
     @app_router.get("/attendance/status")
@@ -290,6 +322,9 @@ def register_routes(
         return {
             "active": bool(session.get("active")),
             "submitted": bool(session.get("submitted")),
+            "review_status": session.get("review_status"),
+            "flagged_count": session.get("flagged_count"),
+            "rejected_count": session.get("rejected_count"),
             "started_at": session.get("started_at"),
             "teacher_ip": session.get("teacher_ip"),
             "expected_classroom": session.get("classroom"),
@@ -322,6 +357,7 @@ def register_routes(
             "already_marked": already_marked,
             "session_submitted": session_submitted,
             "mark_status": mark.get("status") if mark else None,
+            "review_status": mark.get("review_status") if mark else None,
             "marked_at": mark.get("marked_at") if mark else None,
         }
 
@@ -404,7 +440,25 @@ def register_routes(
             return {"success": False, "message": "Attendance already marked for this session"}
 
         image_bytes = await file.read()
-        result = verify_lms_face(face_payload.get("embedding") or [], image_bytes)
+
+        stored_embedding = get_cached_face_embedding(email)
+        if stored_embedding is None:
+            stored_embedding = parse_face_embedding(face_payload.get("faceJson"))
+            if stored_embedding:
+                cache_face_embedding(email, stored_embedding)
+
+        if DEFER_ML_REVIEW:
+            result = await asyncio.to_thread(
+                verify_face_match_only,
+                stored_embedding,
+                image_bytes,
+            )
+        else:
+            result = await asyncio.to_thread(
+                verify_lms_face,
+                stored_embedding,
+                image_bytes,
+            )
 
         if not result.get("success") or not result.get("verified"):
             return result
@@ -413,6 +467,34 @@ def register_routes(
         student_ip = get_client_ip(request)
         teacher_ip = session.get("teacher_ip")
         ip_match = ips_match(teacher_ip, student_ip)
+
+        marked_at = datetime.now(timezone.utc).isoformat()
+
+        if DEFER_ML_REVIEW:
+            record = {
+                "email": email,
+                "name": name,
+                "marked_at": marked_at,
+                "similarity": result.get("similarity"),
+                "student_ip": student_ip,
+                "teacher_ip": teacher_ip,
+                "ip_match": ip_match,
+                "status": "Present",
+                "review_status": "pending",
+                "reason": None,
+                "has_snapshot": True,
+            }
+            add_mark(class_session_id, email, record, image_bytes)
+
+            return {
+                "success": True,
+                "verified": True,
+                "message": "Attendance marked successfully",
+                "similarity": result.get("similarity"),
+                "marked_at": marked_at,
+                "status": "Present",
+                "review_status": "pending",
+            }
 
         location_result = detect_location(image_bytes)
         detected_location = location_result["location"]
@@ -423,7 +505,6 @@ def register_routes(
             expected_classroom,
         )
 
-        marked_at = datetime.now(timezone.utc).isoformat()
         record = {
             "email": email,
             "name": name,
@@ -437,6 +518,7 @@ def register_routes(
             "location_confidence": location_result.get("confidence"),
             "status": status,
             "reason": reason,
+            "review_status": "complete",
             "has_snapshot": True,
         }
 

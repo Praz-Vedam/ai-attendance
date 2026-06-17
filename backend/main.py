@@ -22,7 +22,8 @@ from pydantic import BaseModel
 
 from lms_attendance_routes import register_routes as register_lms_routes, router as lms_router
 from lms_client import close_lms_client, get_lms_client
-from ml_config import ENABLE_ANTI_SPOOF, ENABLE_LOCATION_DETECTION, location_attendance_status
+from session_review import init_review_worker, shutdown_review_poller, start_review_poller
+from ml_config import ENABLE_ANTI_SPOOF, ENABLE_LOCATION_DETECTION, DEFER_ML_REVIEW, location_attendance_status, post_mark_review_status
 from student_store import (
     create_session,
     create_student_with_face,
@@ -104,7 +105,10 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     get_lms_client()
+    init_review_worker(run_post_mark_review)
+    await start_review_poller()
     yield
+    await shutdown_review_poller()
     await close_lms_client()
 
 
@@ -281,7 +285,11 @@ def require_student(
 
 
 def embedding_to_list(embedding) -> list[float]:
-    return [float(x) for x in embedding]
+    arr = np.array(embedding, dtype=np.float64)
+    norm = np.linalg.norm(arr)
+    if norm > 0:
+        arr = arr / norm
+    return [float(x) for x in arr]
 
 
 def get_embedding(image_bytes):
@@ -900,6 +908,15 @@ def verify_lms_face(embedding: list, image_bytes: bytes) -> dict:
             "spoof_confidence": spoof_confidence,
         }
 
+    return verify_face_match_only(embedding, image_bytes, spoof_confidence=spoof_confidence)
+
+
+def verify_face_match_only(
+    embedding: list,
+    image_bytes: bytes,
+    *,
+    spoof_confidence: Optional[float] = None,
+) -> dict:
     live_embedding = get_embedding(image_bytes)
 
     if live_embedding is None:
@@ -921,16 +938,35 @@ def verify_lms_face(embedding: list, image_bytes: bytes) -> dict:
 
     verified = similarity > SIMILARITY_THRESHOLD
 
-    return {
+    result = {
         "success": True,
         "verified": bool(verified),
         "similarity": float(similarity),
-        "spoof_confidence": spoof_confidence,
         "message": (
             "Identity verified"
             if verified
             else "Face does not match registered profile"
         ),
+    }
+    if spoof_confidence is not None:
+        result["spoof_confidence"] = spoof_confidence
+    return result
+
+
+def run_post_mark_review(image_bytes: bytes, expected_classroom: Optional[str]) -> dict:
+    is_real, spoof_confidence = check_spoof(image_bytes)
+    location_result = detect_location(image_bytes)
+    status, reason = post_mark_review_status(
+        is_real,
+        location_result.get("location"),
+        expected_classroom,
+    )
+    return {
+        "spoof_confidence": spoof_confidence,
+        "location": location_result.get("location"),
+        "location_confidence": location_result.get("confidence"),
+        "status": status,
+        "reason": reason,
     }
 
 
@@ -938,6 +974,7 @@ register_lms_routes(
     lms_router,
     get_client_ip=get_client_ip,
     verify_lms_face=verify_lms_face,
+    verify_face_match_only=verify_face_match_only,
     average_embedding_from_images=average_embedding_from_images,
     embedding_to_list=embedding_to_list,
     detect_location=detect_location,

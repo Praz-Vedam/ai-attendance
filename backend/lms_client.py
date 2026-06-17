@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import ssl
@@ -191,6 +192,19 @@ async def validate_lms_token(token: str) -> Dict[str, Any]:
         ) from exc
 
 
+def parse_face_embedding(face_json: Optional[str]) -> List[float]:
+    if not face_json:
+        return []
+    try:
+        payload = json.loads(face_json)
+    except (TypeError, ValueError):
+        return []
+    embedding = payload.get("embedding")
+    if not isinstance(embedding, list):
+        return []
+    return [float(value) for value in embedding]
+
+
 async def get_face_embedding(token: str) -> Dict[str, Any]:
     response = await _lms_request("GET", "/person/face", token)
     _raise_for_lms_response(response, "/person/face")
@@ -209,12 +223,13 @@ async def get_face_status_by_email(token: str, email: str) -> Dict[str, Any]:
 
 
 async def register_face_embedding(token: str, embedding: List[float]) -> None:
+    face_json = json.dumps({"embedding": embedding})
     response = await _lms_request(
         "PUT",
         "/person/face",
         token,
         headers={"Content-Type": "application/json"},
-        json={"embedding": embedding},
+        json={"faceJson": face_json},
     )
     if response.status_code == 400:
         detail = response.json()
