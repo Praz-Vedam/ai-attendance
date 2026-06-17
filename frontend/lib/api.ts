@@ -67,12 +67,19 @@ export function attendanceSnapshotUrl(email: string): string {
   return `${base}/attendance/snapshot/${encodeURIComponent(email)}`;
 }
 
-export async function registerStudent(name: string, scans: Blob[]) {
+export async function registerStudent(
+  name: string,
+  images: {
+    front: Blob;
+    left: Blob;
+    right: Blob;
+  },
+) {
   const formData = new FormData();
   formData.append("name", name.trim());
-  scans.forEach((scan, index) => {
-    formData.append("files", scan, `scan-${index}.jpg`);
-  });
+  formData.append("files", images.front, "front.jpg");
+  formData.append("files", images.left, "left.jpg");
+  formData.append("files", images.right, "right.jpg");
 
   const { data } = await api.post<{
     success: boolean;
