@@ -8,28 +8,35 @@ const FrontGuide = () => (
   <svg
     width="100%"
     height="100%"
-    viewBox={VIEWBOX}
+    viewBox="0 0 1280 720"
     preserveAspectRatio="none"
-    style={{ position: "absolute", top: 0, left: 0 }}
+    style={{
+      position: "absolute",
+      inset: 0,
+      pointerEvents: "none",
+    }}
   >
+    {/* Face Oval */}
     <ellipse
       cx="640"
-      cy="300"
-      rx="140"
-      ry="190"
+      cy="320"
+      rx="160"
+      ry="220"
       fill="none"
-      stroke={GUIDE_STROKE_COLOR}
-      strokeWidth={GUIDE_STROKE_WIDTH}
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      stroke="rgba(255,255,255,0.82)"
+      strokeWidth="3"
     />
+
+    {/* Shoulder Guide */}
     <path
-      d="M 540 480 Q 640 550 740 480 L 740 600 Q 640 630 540 600 Z"
+      d="M 300 500
+         Q 640 580 980 500
+         L 980 620
+         Q 640 650 300 620
+         Z"
       fill="none"
-      stroke={GUIDE_STROKE_COLOR}
-      strokeWidth={GUIDE_STROKE_WIDTH}
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      stroke="rgba(255,255,255,0.82)"
+      strokeWidth="3"
     />
   </svg>
 );
