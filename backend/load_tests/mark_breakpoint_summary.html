@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Mark Breakpoint Summary</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { margin-bottom: 0.25rem; }
+    .sub { color: #666; margin-bottom: 1.5rem; }
+    .hero { font-size: 2rem; font-weight: 700; margin: 1rem 0; }
+    table { border-collapse: collapse; width: 100%; max-width: 1100px; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem 0.65rem; text-align: left; font-size: 0.9rem; }
+    th { background: #f5f5f5; }
+    tr.ok td { background: #f0fdf4; }
+    tr.bad td { background: #fef2f2; }
+  </style>
+</head>
+<body>
+  <h1>POST /mark breakpoint</h1>
+  <p class="sub">Generated 2026-06-18 08:36:00 UTC — target <strong>https://attendance.vedam.org</strong></p>
+  <p class="hero">Max stable concurrent marks: <strong>250</strong></p>
+  <p>Degraded when failure rate ≥ 10.0% or p95 ≥ 15000.0ms.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Users</th><th>Requests</th><th>Failures</th><th>Fail %</th>
+        <th>Avg ms</th><th>p95 ms</th><th>RPS</th><th>Degraded</th><th>Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+        <tr class="ok">
+          <td>50</td>
+          <td>50</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>2796.5</td>
+          <td>3200.0</td>
+          <td>15.71</td>
+          <td>no</td>
+          <td></td>
+        </tr>
+        <tr class="ok">
+          <td>100</td>
+          <td>100</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>4200.6</td>
+          <td>4700.0</td>
+          <td>21.06</td>
+          <td>no</td>
+          <td></td>
+        </tr>
+        <tr class="ok">
+          <td>150</td>
+          <td>150</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>6995.4</td>
+          <td>8000.0</td>
+          <td>18.65</td>
+          <td>no</td>
+          <td></td>
+        </tr>
+        <tr class="ok">
+          <td>200</td>
+          <td>200</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>7827.9</td>
+          <td>9200.0</td>
+          <td>21.56</td>
+          <td>no</td>
+          <td></td>
+        </tr>
+        <tr class="ok">
+          <td>250</td>
+          <td>250</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>11361.5</td>
+          <td>13000.0</td>
+          <td>18.47</td>
+          <td>no</td>
+          <td></td>
+        </tr>
+        <tr class="bad">
+          <td>300</td>
+          <td>300</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>13025.9</td>
+          <td>15000.0</td>
+          <td>19.34</td>
+          <td>yes</td>
+          <td>p95 15000ms >= 15000ms</td>
+        </tr></tbody>
+  </table>
+</body>
+</html>

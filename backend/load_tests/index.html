@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>AI Attendance Load Test Reports</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { margin-bottom: 0.25rem; }
+    .sub { color: #666; margin-bottom: 1.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 960px; }
+    th, td { border: 1px solid #ddd; padding: 0.65rem 0.85rem; text-align: left; }
+    th { background: #f5f5f5; }
+    .btn { display: inline-block; padding: 0.35rem 0.75rem; background: #2563eb;
+            color: #fff; text-decoration: none; border-radius: 4px; }
+    .btn:hover { background: #1d4ed8; }
+    .muted { color: #888; }
+    code { background: #f0f0f0; padding: 0.1rem 0.35rem; border-radius: 3px; }
+    .cmds { background: #f8fafc; border: 1px solid #e2e8f0; padding: 1rem;
+              border-radius: 6px; max-width: 960px; margin-top: 2rem; }
+    pre { margin: 0.5rem 0 0; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>AI Attendance Load Test Reports</h1>
+  <p class="sub">Generated 2026-06-18 08:36:00 UTC</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Test</th>
+        <th>Report file</th>
+        <th>Status</th>
+        <th>Last updated</th>
+        <th>Size</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+        <tr>
+          <td>Polling test (student + teacher portals)</td>
+          <td><code>report.html</code></td>
+          <td>Ready</td>
+          <td>2026-06-18 08:23:35 UTC</td>
+          <td>1453.8 KB</td>
+          <td><a class="btn" href="report.html">Open report</a></td>
+        </tr>
+        <tr>
+          <td>Mark burst test (concurrent attendance)</td>
+          <td><code>mark_report.html</code></td>
+          <td>Not run yet</td>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="muted">Run test first</span></td>
+        </tr>
+        <tr>
+          <td>Throughput test (100 concurrent users)</td>
+          <td><code>throughput_summary.html</code></td>
+          <td>Not run yet</td>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="muted">Run test first</span></td>
+        </tr>
+        <tr>
+          <td>Throughput Locust detail</td>
+          <td><code>throughput_report.html</code></td>
+          <td>Not run yet</td>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="muted">Run test first</span></td>
+        </tr>
+    </tbody>
+  </table>
+  <div class="cmds">
+    <strong>Run all tests:</strong>
+    <pre>cd backend && ./load_tests/run_all.sh</pre>
+    <strong>Individual runs:</strong>
+    <pre>./load_tests/run.sh
+./load_tests/run_mark_session_test.sh
+./load_tests/run_throughput_test.sh</pre>
+  </div>
+</body>
+</html>

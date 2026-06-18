@@ -1,0 +1,78 @@
+{
+  "generated_at": "2026-06-18T08:36:00.005065+00:00",
+  "host": "https://attendance.vedam.org",
+  "class_session_id": 460,
+  "endpoint": "POST /lms/attendance/mark",
+  "max_stable_concurrent_marks": 250,
+  "first_degraded_at": 300,
+  "fail_pct_limit": 10.0,
+  "p95_limit_ms": 15000.0,
+  "steps": [
+    {
+      "users": 50,
+      "requests": 50,
+      "failures": 0,
+      "failure_pct": 0.0,
+      "avg_ms": 2796.5,
+      "p95_ms": 3200.0,
+      "rps": 15.71,
+      "degraded": false,
+      "reason": ""
+    },
+    {
+      "users": 100,
+      "requests": 100,
+      "failures": 0,
+      "failure_pct": 0.0,
+      "avg_ms": 4200.6,
+      "p95_ms": 4700.0,
+      "rps": 21.06,
+      "degraded": false,
+      "reason": ""
+    },
+    {
+      "users": 150,
+      "requests": 150,
+      "failures": 0,
+      "failure_pct": 0.0,
+      "avg_ms": 6995.4,
+      "p95_ms": 8000.0,
+      "rps": 18.65,
+      "degraded": false,
+      "reason": ""
+    },
+    {
+      "users": 200,
+      "requests": 200,
+      "failures": 0,
+      "failure_pct": 0.0,
+      "avg_ms": 7827.9,
+      "p95_ms": 9200.0,
+      "rps": 21.56,
+      "degraded": false,
+      "reason": ""
+    },
+    {
+      "users": 250,
+      "requests": 250,
+      "failures": 0,
+      "failure_pct": 0.0,
+      "avg_ms": 11361.5,
+      "p95_ms": 13000.0,
+      "rps": 18.47,
+      "degraded": false,
+      "reason": ""
+    },
+    {
+      "users": 300,
+      "requests": 300,
+      "failures": 0,
+      "failure_pct": 0.0,
+      "avg_ms": 13025.9,
+      "p95_ms": 15000.0,
+      "rps": 19.34,
+      "degraded": true,
+      "reason": "p95 15000ms >= 15000ms"
+    }
+  ]
+}

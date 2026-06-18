@@ -28,7 +28,6 @@ from lms_redis_store import (
     get_mark,
     get_session,
     get_snapshot,
-    has_mark,
     init_session,
     is_session_active,
     list_marks,
@@ -400,8 +399,9 @@ def register_routes(
                 "message": "Face not registered. Complete face enrollment first.",
             }
 
-        if has_mark(class_session_id, email):
-            return {"success": False, "message": "Attendance already marked for this session"}
+        # Always run face verification and overwrite any existing Redis mark.
+        # if has_mark(class_session_id, email):
+        #     return {"success": False, "message": "Attendance already marked for this session"}
 
         image_bytes = await file.read()
         result = verify_lms_face(face_payload.get("embedding") or [], image_bytes)
