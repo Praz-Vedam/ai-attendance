@@ -54,6 +54,11 @@ class LmsAttendanceSessionRequest(BaseModel):
     class_session_id: int
 
 
+class LmsAttendanceReviewRequest(BaseModel):
+    class_session_id: int
+    force: bool = False
+
+
 def require_lms_token(
     authorization: Annotated[Optional[str], Header()] = None,
 ) -> str:
@@ -299,6 +304,59 @@ def register_routes(
             "review_status": "pending" if DEFER_ML_REVIEW else None,
         }
 
+    @app_router.post("/attendance/review")
+    async def lms_run_attendance_review(
+        payload: LmsAttendanceReviewRequest,
+        _token: str = Depends(require_lms_token),
+        _auth: Dict[str, Any] = Depends(require_lms_auth),
+    ):
+        class_session_id = payload.class_session_id
+        session = get_session(class_session_id)
+        if not session:
+            return {"success": False, "message": "No attendance session found in Redis"}
+
+        if not session.get("submitted"):
+            return {
+                "success": False,
+                "message": "Submit attendance to LMS before running spoof and location review",
+            }
+
+        marks = list_marks(class_session_id)
+        if not marks:
+            return {"success": False, "message": "No marked students to review"}
+
+        review_status = session.get("review_status")
+        if review_status == "in_progress":
+            return {
+                "success": True,
+                "message": "Spoof and location review is already in progress",
+                "review_status": "in_progress",
+            }
+
+        if review_status == "pending" and not payload.force:
+            return {
+                "success": True,
+                "message": "Spoof and location review is already queued",
+                "review_status": "pending",
+            }
+
+        if review_status == "complete" and not payload.force:
+            return {
+                "success": True,
+                "message": "Spoof and location review already complete. Use force to re-run.",
+                "review_status": "complete",
+                "flagged_count": session.get("flagged_count"),
+                "rejected_count": session.get("rejected_count"),
+            }
+
+        schedule_session_review(class_session_id, force=payload.force)
+        return {
+            "success": True,
+            "message": "Spoof and location review started",
+            "review_status": "pending",
+            "marked_count": len(marks),
+        }
+
     @app_router.get("/attendance/status")
     async def lms_attendance_status(
         class_session_id: int = Query(...),
@@ -323,6 +381,7 @@ def register_routes(
             "active": bool(session.get("active")),
             "submitted": bool(session.get("submitted")),
             "review_status": session.get("review_status"),
+            "review_error": session.get("review_error"),
             "flagged_count": session.get("flagged_count"),
             "rejected_count": session.get("rejected_count"),
             "started_at": session.get("started_at"),
@@ -479,6 +538,7 @@ def register_routes(
                 "student_ip": student_ip,
                 "teacher_ip": teacher_ip,
                 "ip_match": ip_match,
+                "ip_flagged": bool(teacher_ip and student_ip and not ip_match),
                 "status": "Present",
                 "review_status": "pending",
                 "reason": None,
@@ -494,6 +554,7 @@ def register_routes(
                 "marked_at": marked_at,
                 "status": "Present",
                 "review_status": "pending",
+                "ip_match": ip_match,
             }
 
         location_result = detect_location(image_bytes)
@@ -514,6 +575,7 @@ def register_routes(
             "student_ip": student_ip,
             "teacher_ip": teacher_ip,
             "ip_match": ip_match,
+            "ip_flagged": bool(teacher_ip and student_ip and not ip_match),
             "location": detected_location,
             "location_confidence": location_result.get("confidence"),
             "status": status,

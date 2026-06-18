@@ -1,4 +1,4 @@
-"""Background deferred spoof + location review after session submit."""
+"""Background deferred spoof + location review after session submit (not IP checks)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from lms_redis_store import (
     get_snapshot,
     list_marks,
     release_review_lock,
+    reset_session_for_review,
     set_session_review_status,
     try_acquire_review_lock,
     update_mark,
@@ -50,18 +51,20 @@ async def shutdown_review_poller() -> None:
     _poller_task = None
 
 
-def schedule_session_review(class_session_id: int) -> None:
+def schedule_session_review(class_session_id: int, *, force: bool = False) -> None:
+    if force:
+        reset_session_for_review(class_session_id)
     enqueue_session_review(class_session_id)
-    asyncio.create_task(review_session(class_session_id))
+    asyncio.create_task(review_session(class_session_id, force=force))
 
 
-async def review_session(class_session_id: int) -> None:
+async def review_session(class_session_id: int, *, force: bool = False) -> None:
     session = get_session(class_session_id)
     if not session:
         return
 
     review_status = session.get("review_status")
-    if review_status in ("in_progress", "complete"):
+    if not force and review_status in ("in_progress", "complete"):
         return
 
     if not try_acquire_review_lock(class_session_id):
@@ -73,12 +76,17 @@ async def review_session(class_session_id: int) -> None:
         return
 
     try:
-        await _run_review(class_session_id, session)
+        await _run_review(class_session_id, session, force=force)
     finally:
         release_review_lock(class_session_id)
 
 
-async def _run_review(class_session_id: int, session: Dict[str, Any]) -> None:
+async def _run_review(
+    class_session_id: int,
+    session: Dict[str, Any],
+    *,
+    force: bool = False,
+) -> None:
     set_session_review_status(class_session_id, "in_progress")
     expected_classroom = session.get("classroom")
     marks = list_marks(class_session_id)
@@ -92,7 +100,7 @@ async def _run_review(class_session_id: int, session: Dict[str, Any]) -> None:
         if not email:
             return
 
-        if mark.get("review_status") == "complete":
+        if not force and mark.get("review_status") == "complete":
             if mark.get("status") == "Flagged":
                 flagged_count += 1
             elif mark.get("status") == "Rejected":

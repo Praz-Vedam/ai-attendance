@@ -40,7 +40,7 @@ def post_mark_review_status(
     detected_location: Optional[str],
     expected_classroom: Optional[str],
 ) -> Tuple[str, Optional[str]]:
-    """Final Redis status after deferred spoof + location review."""
+    """Deferred review status from anti-spoof + background location models only (not IP)."""
     if ENABLE_ANTI_SPOOF and not is_real:
         return "Rejected", "Spoof detected"
 

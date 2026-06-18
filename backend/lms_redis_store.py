@@ -112,13 +112,36 @@ def get_mark(class_session_id: int, email: str) -> Optional[Dict[str, Any]]:
     return json.loads(raw.decode("utf-8"))
 
 
+def mark_risk_sort_key(mark: Dict[str, Any]) -> tuple:
+    """Sort marks by deferred AI review risk (spoof + location only, not IP)."""
+    review = mark.get("review_status")
+    if review != "complete":
+        return (1, 9, 9, 0.0, 0.0, mark.get("marked_at", ""))
+
+    status = mark.get("status") or "Present"
+    status_order = {"Rejected": 0, "Flagged": 1, "Present": 2}.get(status, 3)
+    reason_order = {
+        "Spoof detected": 0,
+        "Outside Classroom": 1,
+        "Wrong Classroom": 2,
+    }.get(mark.get("reason") or "", 3)
+
+    spoof = mark.get("spoof_confidence")
+    spoof_risk = float(spoof) if spoof is not None else 0.0
+
+    location = mark.get("location_confidence")
+    location_risk = float(location) if location is not None else 0.0
+
+    return (0, status_order, reason_order, -spoof_risk, -location_risk, mark.get("marked_at", ""))
+
+
 def list_marks(class_session_id: int) -> List[Dict[str, Any]]:
     raw_map = redis_client.hgetall(_marks_key(class_session_id))
     marks: List[Dict[str, Any]] = []
     for raw in raw_map.values():
         record = json.loads(raw.decode("utf-8"))
         marks.append(record)
-    marks.sort(key=lambda item: item.get("marked_at", ""))
+    marks.sort(key=mark_risk_sort_key)
     return marks
 
 
@@ -237,6 +260,42 @@ def try_acquire_review_lock(class_session_id: int) -> bool:
 
 def release_review_lock(class_session_id: int) -> None:
     redis_client.delete(f"lms:attendance:review_lock:{class_session_id}")
+
+
+def reset_session_for_review(class_session_id: int) -> None:
+    """Clear prior review results so spoof/location checks can run again."""
+    session = get_session(class_session_id)
+    if session:
+        session["review_status"] = "pending"
+        session.pop("review_started_at", None)
+        session.pop("review_completed_at", None)
+        session.pop("flagged_count", None)
+        session.pop("rejected_count", None)
+        session.pop("review_error", None)
+        redis_client.set(
+            _session_key(class_session_id),
+            json.dumps(session).encode("utf-8"),
+            ex=SESSION_TTL_SECONDS,
+        )
+
+    marks_key = _marks_key(class_session_id)
+    emails = [
+        key.decode("utf-8") if isinstance(key, bytes) else key
+        for key in redis_client.hkeys(marks_key)
+    ]
+    for email in emails:
+        raw = redis_client.hget(marks_key, email)
+        if not raw:
+            continue
+        record = json.loads(raw.decode("utf-8"))
+        record["status"] = "Present"
+        record["review_status"] = "pending"
+        record.pop("reason", None)
+        record.pop("spoof_confidence", None)
+        record.pop("location", None)
+        record.pop("location_confidence", None)
+        record.pop("reviewed_at", None)
+        redis_client.hset(marks_key, email, json.dumps(record).encode("utf-8"))
 
 
 def dequeue_session_review(timeout_seconds: int = 5) -> Optional[int]:

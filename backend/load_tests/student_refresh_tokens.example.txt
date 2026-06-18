@@ -1,0 +1,9 @@
+# One student refreshToken per line (up to MARK_USERS, default 100).
+# Copy to student_refresh_tokens.txt and paste tokens from student-portal logins.
+#
+# Each student must:
+#   - Be enrolled in the class session (CLASS_SESSION_ID)
+#   - Have face data registered in LMS
+#
+# Get refreshToken: DevTools → Application → Cookies → localhost → refreshToken
+# (log into student portal as each test student)
