@@ -1,224 +1,167 @@
 """
-Load tests for AI attendance backend (main branch — LMS-integrated routes).
+Sustained throughput load test — mixed student + teacher traffic.
 
-Simulates admin-portal + student-portal traffic during a live class session.
+Default scenario (300 users / 2 min):
+  - 200 students poll GET /lms/attendance/student-status continuously
+  - 100 students POST /lms/attendance/mark in a 15s burst (face-api + JPEG)
+  - 1 teacher polls roster + session status
 
-Run:
-  ./load_tests/run.sh
-  LOCUST_HOST=https://your-hosted-url.com ./load_tests/run.sh
-
-Config: load_tests/secrets.env (see secrets.example.env)
-Report: load_tests/report.html
+Run via: ./load_tests/run_throughput_test.sh
 """
 
 from __future__ import annotations
 
-import itertools
-import os
-from pathlib import Path
+import gevent
+from locust import HttpUser, between, constant, events, task
 
-from locust import HttpUser, between, events, task
-
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
-LOAD_TESTS_DIR = Path(__file__).resolve().parent
-LOCAL_ENV = LOAD_TESTS_DIR / "local.env"
-
-if load_dotenv is not None:
-    load_dotenv(LOCAL_ENV, override=False)
-
-CLASS_SESSION_ID = int(os.getenv("CLASS_SESSION_ID", "0"))
-STUDENT_TOKENS_FILE = Path(
-    os.getenv("STUDENT_TOKENS_FILE", str(LOAD_TESTS_DIR / "student_tokens.txt"))
+from locust_common import (
+    CLASS_SESSION_ID,
+    MARK_USERS,
+    POLL_USERS,
+    STUDENT_TOKENS_FILE,
+    TEACHER_TOKEN,
+    TokenPool,
+    auth_headers,
+    build_mark_form_data,
+    class_session_query,
+    face_image_bytes,
+    load_token_embeddings,
+    load_tokens,
+    mark_delay_seconds,
+    record_mark_response,
+    validate_mark_prerequisites,
+    validate_polling_prerequisites,
 )
-TEACHER_TOKEN = os.getenv("TEACHER_TOKEN", "").strip()
-FACE_IMAGE_PATH = Path(
-    os.getenv("FACE_IMAGE_PATH", str(LOAD_TESTS_DIR / "fixtures" / "sample.jpg"))
-)
-ENABLE_MARK_TASK = os.getenv("ENABLE_MARK_TASK", "1").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-}
 
-STUDENT_TOKENS = []
-_token_cycle = None
-_face_bytes: bytes | None = None
-
-
-def _load_tokens(path: Path) -> list[str]:
-    if not path.is_file():
-        return []
-    out: list[str] = []
-    for line in path.read_text().splitlines():
-        s = line.strip()
-        if s and not s.startswith("#"):
-            out.append(s.removeprefix("Bearer ").strip())
-    return out
-
-
-def _auth(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _session_qs() -> str:
-    return f"class_session_id={CLASS_SESSION_ID}"
+STUDENT_TOKENS = load_tokens(STUDENT_TOKENS_FILE)
+TOKEN_POOL = TokenPool(STUDENT_TOKENS)
 
 
 @events.init.add_listener
-def _on_init(environment=None, **kwargs) -> None:
-    global STUDENT_TOKENS, _token_cycle
-    STUDENT_TOKENS = _load_tokens(STUDENT_TOKENS_FILE)
-    _token_cycle = itertools.cycle(STUDENT_TOKENS) if STUDENT_TOKENS else None
-
-    if CLASS_SESSION_ID <= 0:
-        print("\n[load_tests] WARNING: CLASS_SESSION_ID not set\n")
-    if not STUDENT_TOKENS:
-        print(f"\n[load_tests] WARNING: no tokens in {STUDENT_TOKENS_FILE}\n")
+def on_locust_init(environment=None, **_kwargs) -> None:
+    for message in validate_polling_prerequisites(STUDENT_TOKENS, label="[throughput]"):
+        print(f"\n{message}\n")
+    if MARK_USERS > 0:
+        for message in validate_mark_prerequisites(STUDENT_TOKENS, label="[throughput]"):
+            print(f"\n{message}\n")
+        if STUDENT_TOKENS:
+            load_token_embeddings(STUDENT_TOKENS)
     if not TEACHER_TOKEN:
-        print("\n[load_tests] WARNING: TEACHER_TOKEN not set\n")
+        print(
+            "\n[throughput] WARNING: TEACHER_TOKEN is not set. "
+            "Teacher polling will be skipped.\n"
+        )
 
 
-class _Base(HttpUser):
+class _BaseUser(HttpUser):
     abstract = True
-    wait_time = between(2, 5)
 
-    def _student_token(self) -> str | None:
-        if _token_cycle is None:
-            return None
-        return next(_token_cycle)
-
-    def _check(self, response, *, allow_business_fail: bool = False) -> None:
+    def _fail_unless_ok(self, response) -> None:
         if response.status_code >= 500:
             response.failure(f"HTTP {response.status_code}")
         elif response.status_code == 401:
-            response.failure("HTTP 401")
+            response.failure("HTTP 401 — invalid or expired LMS token")
         elif response.status_code >= 400:
             response.failure(f"HTTP {response.status_code}")
-        elif not allow_business_fail:
-            try:
-                body = response.json()
-                if isinstance(body, dict) and body.get("success") is False:
-                    response.failure(body.get("message") or "success=false")
-            except Exception:
-                pass
 
 
-# --- Endpoints on main branch (production portals) ---
+class LmsStudentPoller(_BaseUser):
+    """Background polling for the full run duration."""
 
-
-class HealthUser(_Base):
-    """GET /"""
-
-    weight = 1
-
-    @task
-    def health(self) -> None:
-        with self.client.get("/", name="GET /", catch_response=True) as r:
-            if r.status_code != 200:
-                r.failure(f"HTTP {r.status_code}")
-
-
-class StudentPoller(_Base):
-    """
-    Student portal during live class:
-      GET /lms/attendance/student-status  (primary poll)
-      GET /lms/attendance/status          (secondary)
-    """
-
-    weight = 9
+    weight = max(POLL_USERS, 0)
+    wait_time = between(1, 3)
 
     def on_start(self) -> None:
-        self.token = self._student_token()
+        self.token = TOKEN_POOL.next()
 
     @task(5)
     def student_status(self) -> None:
         if not self.token or CLASS_SESSION_ID <= 0:
             return
         with self.client.get(
-            f"/lms/attendance/student-status?{_session_qs()}",
-            headers=_auth(self.token),
+            f"/lms/attendance/student-status?{class_session_query()}",
+            headers=auth_headers(self.token),
             name="GET /lms/attendance/student-status",
             catch_response=True,
-        ) as r:
-            self._check(r)
+        ) as response:
+            self._fail_unless_ok(response)
 
     @task(2)
     def session_status(self) -> None:
         if not self.token or CLASS_SESSION_ID <= 0:
             return
         with self.client.get(
-            f"/lms/attendance/status?{_session_qs()}",
-            headers=_auth(self.token),
+            f"/lms/attendance/status?{class_session_query()}",
+            headers=auth_headers(self.token),
             name="GET /lms/attendance/status",
             catch_response=True,
-        ) as r:
-            self._check(r)
+        ) as response:
+            self._fail_unless_ok(response)
 
 
-class TeacherPoller(_Base):
-    """
-    Admin portal during live class:
-      GET /lms/attendance/status  (every ~4s)
-      GET /lms/attendance/roster  (less frequent)
-    """
+class LmsBurstMarker(_BaseUser):
+    """Mark once in the opening burst window, then idle for the rest of the run."""
 
-    weight = 1
+    weight = max(MARK_USERS, 0)
+    wait_time = constant(3600)
+
+    def on_start(self) -> None:
+        token = TOKEN_POOL.next()
+        if not token or CLASS_SESSION_ID <= 0:
+            return
+
+        form_data = build_mark_form_data(token)
+        if not form_data:
+            return
+
+        try:
+            image_bytes = face_image_bytes()
+        except FileNotFoundError:
+            return
+
+        gevent.sleep(mark_delay_seconds())
+
+        with self.client.post(
+            "/lms/attendance/mark",
+            headers=auth_headers(token),
+            data=form_data,
+            files={"file": ("attendance.jpg", image_bytes, "image/jpeg")},
+            name="POST /lms/attendance/mark",
+            catch_response=True,
+        ) as response:
+            record_mark_response(response)
+
+    @task
+    def idle(self) -> None:
+        pass
+
+
+class LmsTeacherPoller(_BaseUser):
+    """Admin portal polling during the live session."""
+
+    weight = 1 if TEACHER_TOKEN else 0
+    wait_time = between(2, 5)
 
     @task(3)
-    def status(self) -> None:
+    def attendance_status(self) -> None:
         if not TEACHER_TOKEN or CLASS_SESSION_ID <= 0:
             return
         with self.client.get(
-            f"/lms/attendance/status?{_session_qs()}",
-            headers=_auth(TEACHER_TOKEN),
+            f"/lms/attendance/status?{class_session_query()}",
+            headers=auth_headers(TEACHER_TOKEN),
             name="GET /lms/attendance/status [teacher]",
             catch_response=True,
-        ) as r:
-            self._check(r)
+        ) as response:
+            self._fail_unless_ok(response)
 
     @task(1)
     def roster(self) -> None:
         if not TEACHER_TOKEN or CLASS_SESSION_ID <= 0:
             return
         with self.client.get(
-            f"/lms/attendance/roster?{_session_qs()}",
-            headers=_auth(TEACHER_TOKEN),
+            f"/lms/attendance/roster?{class_session_query()}",
+            headers=auth_headers(TEACHER_TOKEN),
             name="GET /lms/attendance/roster",
             catch_response=True,
-        ) as r:
-            self._check(r)
-
-
-if ENABLE_MARK_TASK:
-
-    class StudentMarker(_Base):
-        """POST /lms/attendance/mark — full ML path on main (face + spoof + location)."""
-
-        weight = 1
-        wait_time = between(5, 15)
-
-        def on_start(self) -> None:
-            self.token = self._student_token()
-
-        @task
-        def mark(self) -> None:
-            global _face_bytes
-            if not self.token or CLASS_SESSION_ID <= 0:
-                return
-            if _face_bytes is None:
-                if not FACE_IMAGE_PATH.is_file():
-                    return
-                _face_bytes = FACE_IMAGE_PATH.read_bytes()
-            with self.client.post(
-                "/lms/attendance/mark",
-                headers=_auth(self.token),
-                data={"class_session_id": str(CLASS_SESSION_ID)},
-                files={"file": ("attendance.jpg", _face_bytes, "image/jpeg")},
-                name="POST /lms/attendance/mark",
-                catch_response=True,
-            ) as r:
-                self._check(r, allow_business_fail=True)
+        ) as response:
+            self._fail_unless_ok(response)

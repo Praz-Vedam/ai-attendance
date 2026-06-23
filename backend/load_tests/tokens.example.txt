@@ -1,0 +1,5 @@
+# One LMS access token per line (student accounts).
+# Copy to student_tokens.txt and paste real Bearer tokens from student-portal login.
+# For mark-attendance tests, use one token per simulated student when possible.
+#
+# eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...

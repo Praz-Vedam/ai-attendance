@@ -1,101 +1,102 @@
 """
-150-concurrent mark-attendance burst for one class session (main branch).
+Mark-attendance burst test — one POST per marking user.
 
-Each user marks once on spawn via POST /lms/attendance/mark.
-
-Run: ./load_tests/run_mark_session_test.sh
-Report: load_tests/mark_report.html
+Default: 300 users (200 polling + 100 marking) / 15s burst / 2m run.
+Run via: ./load_tests/run_mark_session_test.sh
 """
 
 from __future__ import annotations
 
-import itertools
-import os
-import threading
-from pathlib import Path
+import gevent
+from locust import HttpUser, between, constant, events, task
 
-from locust import HttpUser, constant, events, task
-
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
-LOAD_TESTS_DIR = Path(__file__).resolve().parent
-LOCAL_ENV = LOAD_TESTS_DIR / "local.env"
-
-if load_dotenv is not None:
-    load_dotenv(LOCAL_ENV, override=False)
-
-CLASS_SESSION_ID = int(os.getenv("CLASS_SESSION_ID", "0"))
-STUDENT_TOKENS_FILE = Path(
-    os.getenv("STUDENT_TOKENS_FILE", str(LOAD_TESTS_DIR / "student_tokens_mark.txt"))
+from locust_common import (
+    CLASS_SESSION_ID,
+    LOCUST_USERS,
+    MARK_USERS,
+    POLL_USERS,
+    STUDENT_TOKENS_FILE,
+    TokenPool,
+    auth_headers,
+    build_mark_form_data,
+    class_session_query,
+    face_image_bytes,
+    load_token_embeddings,
+    load_tokens,
+    mark_delay_seconds,
+    record_mark_response,
+    validate_mark_prerequisites,
 )
-FACE_IMAGE_PATH = Path(
-    os.getenv("FACE_IMAGE_PATH", str(LOAD_TESTS_DIR / "fixtures" / "sample.jpg"))
-)
-MARK_USERS = int(os.getenv("MARK_USERS", "150"))
 
-_tokens: list[str] = []
-_face_bytes: bytes | None = None
-
-
-class _TokenPool:
-    def __init__(self, tokens: list[str]) -> None:
-        self._cycle = itertools.cycle(tokens)
-        self._lock = threading.Lock()
-
-    def next(self) -> str | None:
-        if not _tokens:
-            return None
-        with self._lock:
-            return next(self._cycle)
-
-
-_pool = _TokenPool([])
+STUDENT_TOKENS = load_tokens(STUDENT_TOKENS_FILE)
+TOKEN_POOL = TokenPool(STUDENT_TOKENS)
 
 
 @events.init.add_listener
-def _on_init(environment=None, **kwargs) -> None:
-    global _tokens, _pool
-    if not STUDENT_TOKENS_FILE.is_file():
-        return
-    _tokens = [
-        ln.strip().removeprefix("Bearer ").strip()
-        for ln in STUDENT_TOKENS_FILE.read_text().splitlines()
-        if ln.strip() and not ln.startswith("#")
-    ]
-    _pool = _TokenPool(_tokens)
-    print(
-        f"\n[mark_session] session={CLASS_SESSION_ID} tokens={len(_tokens)} "
-        f"target_users={MARK_USERS}\n"
-    )
+def on_locust_init(environment=None, **_kwargs) -> None:
+    for message in validate_mark_prerequisites(STUDENT_TOKENS, label="[mark_session]"):
+        print(f"\n{message}\n")
+    if STUDENT_TOKENS:
+        embeddings = load_token_embeddings(STUDENT_TOKENS)
+        print(
+            f"\n[mark_session] Ready — session={CLASS_SESSION_ID}, "
+            f"total_users={LOCUST_USERS} (poll={POLL_USERS}, mark={MARK_USERS}), "
+            f"tokens={len(STUDENT_TOKENS)}, embeddings={len(embeddings)}\n"
+        )
+
+
+class SessionPoller(HttpUser):
+    weight = max(POLL_USERS, 0)
+    wait_time = between(1, 3)
+
+    def on_start(self) -> None:
+        self.token = TOKEN_POOL.next()
+
+    @task
+    def student_status(self) -> None:
+        if not self.token or CLASS_SESSION_ID <= 0:
+            return
+        with self.client.get(
+            f"/lms/attendance/student-status?{class_session_query()}",
+            headers=auth_headers(self.token),
+            name="GET /lms/attendance/student-status",
+            catch_response=True,
+        ) as response:
+            if response.status_code >= 500:
+                response.failure(f"HTTP {response.status_code}")
+            elif response.status_code == 401:
+                response.failure("HTTP 401")
 
 
 class ConcurrentMarkStudent(HttpUser):
+    weight = max(MARK_USERS, 0)
     wait_time = constant(3600)
 
     def on_start(self) -> None:
-        global _face_bytes
-        token = _pool.next()
+        token = TOKEN_POOL.next()
         if not token or CLASS_SESSION_ID <= 0:
             return
-        if _face_bytes is None and FACE_IMAGE_PATH.is_file():
-            _face_bytes = FACE_IMAGE_PATH.read_bytes()
-        if not _face_bytes:
+
+        form_data = build_mark_form_data(token)
+        if not form_data:
             return
+
+        try:
+            image_bytes = face_image_bytes()
+        except FileNotFoundError:
+            return
+
+        gevent.sleep(mark_delay_seconds())
+
         with self.client.post(
             "/lms/attendance/mark",
-            headers={"Authorization": f"Bearer {token}"},
-            data={"class_session_id": str(CLASS_SESSION_ID)},
-            files={"file": ("attendance.jpg", _face_bytes, "image/jpeg")},
+            headers=auth_headers(token),
+            data=form_data,
+            files={"file": ("attendance.jpg", image_bytes, "image/jpeg")},
             name="POST /lms/attendance/mark",
             catch_response=True,
-        ) as r:
-            if r.status_code >= 500:
-                r.failure(f"HTTP {r.status_code}")
-            elif r.status_code == 401:
-                r.failure("HTTP 401")
+        ) as response:
+            record_mark_response(response)
 
     @task
     def idle(self) -> None:

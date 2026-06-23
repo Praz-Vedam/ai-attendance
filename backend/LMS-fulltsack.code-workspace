@@ -4,13 +4,13 @@
             "path": "./"
         },
         {
-            "path": "../student-portal"
+            "path": "../../student-portal"
         },
         {
-            "path": "../admin-portal"
+            "path": "../../admin-portal"
         },
         {
-            "path": "../lms"
+            "path": "../../lms"
         }
     ]
 }

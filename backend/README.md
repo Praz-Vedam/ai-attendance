@@ -115,7 +115,9 @@ Legacy/demo routes (`/verify-face`, `/start-attendance`, `/attendance-session`) 
 - **Data directory**: change `DATA_DIR` in `local_db.py` if you want a different path.
 - **CORS**: local dev origins in `main.py`, plus `FRONTEND_URL` / `CORS_ORIGINS` from `.env`, and `https://*.vercel.app` via regex (for Vercel-hosted frontend). See `.env.example`.
 - **Vercel + laptop backend**: expose this API with an HTTPS tunnel (ngrok / Cloudflare); set `NEXT_PUBLIC_API_URL` on Vercel. Details: [`../frontend/README.md`](../frontend/README.md#deploy-frontend-on-vercel-backend-on-your-laptop).
-- **Face match threshold**: `SIMILARITY_THRESHOLD` in `main.py` (default `0.45`).
+- **Face match thresholds**:
+  - Browser face-api.js (128-d): `FACE_API_DISTANCE_THRESHOLD` (default `0.45`, euclidean distance). LMS flows accept face-api.js descriptors only.
+- **Anti-spoof / location**: image-only pipelines; unchanged by browser embeddings (`ENABLE_ANTI_SPOOF`, `ENABLE_LOCATION_DETECTION`)
 - **Session TTL**: `SESSION_TTL_SECONDS` (default 7 days).
 
 ## Troubleshooting
