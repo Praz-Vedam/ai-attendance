@@ -1,4 +1,8 @@
-"""Feature flags for optional ML pipelines (anti-spoof, location)."""
+"""Feature flags for optional ML pipelines (anti-spoof, location).
+
+Anti-spoof and background/location classifiers operate on raw JPEG snapshots only.
+They do not depend on face embeddings (browser face-api.js 128-dim descriptors).
+"""
 
 from __future__ import annotations
 

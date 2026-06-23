@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from redis_client import redis_client
+from face_matching import parse_embedding_payload
 
 SESSION_TTL_SECONDS = 24 * 60 * 60
 EMBEDDING_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -31,6 +32,23 @@ def _embedding_cache_key(email: str) -> str:
     return f"lms:face:embedding:{safe_email}"
 
 
+def _session_embeddings_key(class_session_id: int) -> str:
+    return f"lms:attendance:face_embeddings:{class_session_id}"
+
+
+def _session_roster_key(class_session_id: int) -> str:
+    return f"lms:attendance:face_roster:{class_session_id}"
+
+
+def _mark_failures_key(class_session_id: int) -> str:
+    return f"lms:attendance:mark_failures:{class_session_id}"
+
+
+def _failure_snapshot_key(class_session_id: int, email: str) -> str:
+    safe_email = email.replace("@", "_at_").replace(".", "_")
+    return f"lms:attendance:failure_snapshot:{class_session_id}:{safe_email}"
+
+
 def init_session(
     class_session_id: int,
     *,
@@ -52,6 +70,10 @@ def init_session(
     pipe.set(_session_key(class_session_id), json.dumps(payload).encode("utf-8"))
     pipe.expire(_session_key(class_session_id), SESSION_TTL_SECONDS)
     pipe.delete(_marks_key(class_session_id))
+    pipe.delete(_session_embeddings_key(class_session_id))
+    pipe.delete(_session_roster_key(class_session_id))
+    _delete_failure_snapshots(pipe, class_session_id)
+    pipe.delete(_mark_failures_key(class_session_id))
     pipe.execute()
     return payload
 
@@ -149,6 +171,77 @@ def get_snapshot(class_session_id: int, email: str) -> Optional[bytes]:
     return redis_client.get(_snapshot_key(class_session_id, email))
 
 
+def get_failure_snapshot(class_session_id: int, email: str) -> Optional[bytes]:
+    return redis_client.get(_failure_snapshot_key(class_session_id, email))
+
+
+def add_mark_failure(
+    class_session_id: int,
+    email: str,
+    record: Dict[str, Any],
+    snapshot_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    failures_key = _mark_failures_key(class_session_id)
+    normalized_email = email.lower()
+    attempt_count = 1
+    existing_raw = redis_client.hget(failures_key, normalized_email)
+    if existing_raw:
+        try:
+            existing = json.loads(existing_raw.decode("utf-8"))
+            attempt_count = int(existing.get("attempt_count") or 0) + 1
+        except (TypeError, ValueError):
+            attempt_count = 1
+
+    payload = {
+        **record,
+        "email": normalized_email,
+        "attempt_count": attempt_count,
+        "attempted_at": datetime.now(timezone.utc).isoformat(),
+        "has_snapshot": bool(snapshot_bytes),
+    }
+
+    pipe = redis_client.pipeline()
+    pipe.hset(failures_key, normalized_email, json.dumps(payload).encode("utf-8"))
+    pipe.expire(failures_key, SESSION_TTL_SECONDS)
+    if snapshot_bytes:
+        snap_key = _failure_snapshot_key(class_session_id, normalized_email)
+        pipe.set(snap_key, snapshot_bytes)
+        pipe.expire(snap_key, SESSION_TTL_SECONDS)
+    pipe.execute()
+    return payload
+
+
+def get_mark_failure(class_session_id: int, email: str) -> Optional[Dict[str, Any]]:
+    raw = redis_client.hget(_mark_failures_key(class_session_id), email.lower())
+    if not raw:
+        return None
+    return json.loads(raw.decode("utf-8"))
+
+
+def list_mark_failures(class_session_id: int) -> List[Dict[str, Any]]:
+    raw_map = redis_client.hgetall(_mark_failures_key(class_session_id))
+    failures: List[Dict[str, Any]] = []
+    for raw in raw_map.values():
+        failures.append(json.loads(raw.decode("utf-8")))
+    failures.sort(key=lambda item: item.get("attempted_at") or "", reverse=True)
+    return failures
+
+
+def clear_mark_failure(class_session_id: int, email: str) -> None:
+    normalized_email = email.lower()
+    pipe = redis_client.pipeline()
+    pipe.hdel(_mark_failures_key(class_session_id), normalized_email)
+    pipe.delete(_failure_snapshot_key(class_session_id, normalized_email))
+    pipe.execute()
+
+
+def _delete_failure_snapshots(pipe, class_session_id: int) -> None:
+    failure_emails = redis_client.hkeys(_mark_failures_key(class_session_id))
+    for email_key in failure_emails:
+        email = email_key.decode("utf-8") if isinstance(email_key, bytes) else email_key
+        pipe.delete(_failure_snapshot_key(class_session_id, email))
+
+
 def clear_session(class_session_id: int) -> None:
     marks_key = _marks_key(class_session_id)
     emails = [
@@ -158,6 +251,10 @@ def clear_session(class_session_id: int) -> None:
     pipe = redis_client.pipeline()
     pipe.delete(_session_key(class_session_id))
     pipe.delete(marks_key)
+    pipe.delete(_session_embeddings_key(class_session_id))
+    pipe.delete(_session_roster_key(class_session_id))
+    _delete_failure_snapshots(pipe, class_session_id)
+    pipe.delete(_mark_failures_key(class_session_id))
     for email in emails:
         pipe.delete(_snapshot_key(class_session_id, email))
     pipe.execute()
@@ -239,14 +336,95 @@ def get_cached_face_embedding(email: str) -> Optional[List[float]]:
         payload = json.loads(raw.decode("utf-8"))
     except (TypeError, ValueError):
         return None
-    embedding = payload.get("embedding")
-    if not isinstance(embedding, list):
-        return None
-    return [float(value) for value in embedding]
+    embedding = parse_embedding_payload(payload)
+    return embedding or None
 
 
 def invalidate_face_embedding_cache(email: str) -> None:
     redis_client.delete(_embedding_cache_key(email.lower()))
+
+
+def cache_session_face_embeddings(
+    class_session_id: int,
+    embeddings_by_email: Dict[str, List[float]],
+) -> int:
+    key = _session_embeddings_key(class_session_id)
+    pipe = redis_client.pipeline()
+    pipe.delete(key)
+    stored_count = 0
+    for email, embedding in embeddings_by_email.items():
+        if not embedding:
+            continue
+        pipe.hset(
+            key,
+            email.lower(),
+            json.dumps({"embedding": embedding}).encode("utf-8"),
+        )
+        stored_count += 1
+    pipe.expire(key, SESSION_TTL_SECONDS)
+    pipe.execute()
+    return stored_count
+
+
+def get_session_face_embedding(
+    class_session_id: int,
+    email: str,
+) -> Optional[List[float]]:
+    raw = redis_client.hget(_session_embeddings_key(class_session_id), email.lower())
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (TypeError, ValueError):
+        return None
+    embedding = parse_embedding_payload(payload)
+    return embedding or None
+
+
+def has_session_face_embedding(class_session_id: int, email: str) -> bool:
+    return redis_client.hexists(
+        _session_embeddings_key(class_session_id),
+        email.lower(),
+    )
+
+
+def cache_session_face_roster(
+    class_session_id: int,
+    students: List[Dict[str, Any]],
+) -> None:
+    key = _session_roster_key(class_session_id)
+    pipe = redis_client.pipeline()
+    pipe.delete(key)
+    for student in students:
+        email = (student.get("email") or "").lower()
+        if not email:
+            continue
+        pipe.hset(
+            key,
+            email,
+            json.dumps(
+                {
+                    "email": student.get("email"),
+                    "hasFaceData": bool(student.get("hasFaceData")),
+                }
+            ).encode("utf-8"),
+        )
+    pipe.expire(key, SESSION_TTL_SECONDS)
+    pipe.execute()
+
+
+def get_session_face_roster_map(class_session_id: int) -> Dict[str, Dict[str, Any]]:
+    raw_map = redis_client.hgetall(_session_roster_key(class_session_id))
+    roster: Dict[str, Dict[str, Any]] = {}
+    for raw in raw_map.values():
+        try:
+            student = json.loads(raw.decode("utf-8"))
+        except (TypeError, ValueError):
+            continue
+        email = (student.get("email") or "").lower()
+        if email:
+            roster[email] = student
+    return roster
 
 
 def enqueue_session_review(class_session_id: int) -> None:

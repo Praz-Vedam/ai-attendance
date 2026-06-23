@@ -49,8 +49,10 @@ def _load_dotenv(path: Path) -> None:
 
 
 def _write_env(path: Path, values: Dict[str, str]) -> None:
-    lines = [f"{key}={value}" for key, value in values.items()]
-    path.write_text("\n".join(lines) + "\n")
+    sys.path.insert(0, str(LOAD_TESTS_DIR))
+    from env_util import write_env_file
+
+    write_env_file(path, values)
 
 
 def _lms_bases() -> list[str]:

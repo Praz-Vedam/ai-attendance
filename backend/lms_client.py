@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 import certifi
 import httpx
 
+from face_matching import parse_embedding_payload
+
 logger = logging.getLogger(__name__)
 
 
@@ -199,10 +201,7 @@ def parse_face_embedding(face_json: Optional[str]) -> List[float]:
         payload = json.loads(face_json)
     except (TypeError, ValueError):
         return []
-    embedding = payload.get("embedding")
-    if not isinstance(embedding, list):
-        return []
-    return [float(value) for value in embedding]
+    return parse_embedding_payload(payload)
 
 
 async def get_face_embedding(token: str) -> Dict[str, Any]:
@@ -236,6 +235,68 @@ async def register_face_embedding(token: str, embedding: List[float]) -> None:
         message = detail.get("message") or "Face registration failed"
         raise ValueError(message)
     _raise_for_lms_response(response, "/person/face")
+
+
+async def get_bulk_face_embeddings(token: str, class_session_id: int) -> Dict[str, Any]:
+    """Fetch enrolled students' face data for a class session from LMS."""
+    response = await _lms_request(
+        "POST",
+        "/person/face/bulk",
+        token,
+        headers={"Content-Type": "application/json"},
+        json={"classSessionId": class_session_id},
+    )
+    _raise_for_lms_response(response, "/person/face/bulk")
+    data = _unwrap_lms_response(response.json())
+    return data if isinstance(data, dict) else {}
+
+
+def parse_bulk_face_data_response(bulk: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Parse LMS bulk face response into Redis-ready session data.
+
+    LMS payload:
+      { "classSessionId": 1, "students": [{ "email", "hasFaceData", "faceJson" }] }
+    """
+    students = bulk.get("students") or []
+    embeddings_by_email: Dict[str, List[float]] = {}
+    roster: List[Dict[str, Any]] = []
+    students_with_face_data = 0
+
+    for student in students:
+        if not isinstance(student, dict):
+            continue
+        email = (student.get("email") or "").strip()
+        if not email:
+            continue
+
+        has_face_data = bool(student.get("hasFaceData"))
+        roster.append(
+            {
+                "email": email,
+                "hasFaceData": has_face_data,
+            }
+        )
+
+        if not has_face_data:
+            continue
+
+        embedding = parse_face_embedding(student.get("faceJson"))
+        if embedding:
+            embeddings_by_email[email.lower()] = embedding
+            students_with_face_data += 1
+
+    return {
+        "class_session_id": bulk.get("classSessionId"),
+        "embeddings_by_email": embeddings_by_email,
+        "roster": roster,
+        "students_enrolled": len(roster),
+        "students_with_face_data": students_with_face_data,
+    }
+
+
+def embeddings_from_bulk_response(bulk: Dict[str, Any]) -> Dict[str, List[float]]:
+    return parse_bulk_face_data_response(bulk)["embeddings_by_email"]
 
 
 async def import_attendance(token: str, class_session_id: int) -> None:
@@ -285,16 +346,37 @@ async def get_attendance_records(
     return []
 
 
+def _prepare_bulk_attendance_payload(
+    updates: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Normalize bulk attendance updates to LMS emailId + status format."""
+    prepared: List[Dict[str, str]] = []
+    for update in updates:
+        if not isinstance(update, dict):
+            continue
+        email = (update.get("emailId") or update.get("email") or "").strip()
+        status = (update.get("status") or "").strip().upper()
+        if not email or not status:
+            continue
+        prepared.append({"emailId": email, "status": status})
+    return prepared
+
+
 async def bulk_update_attendance(
-    token: str, updates: List[Dict[str, Any]]
+    token: str, class_session_id: int, updates: List[Dict[str, Any]]
 ) -> None:
+    payload = _prepare_bulk_attendance_payload(updates)
+    if not payload:
+        raise ValueError("No valid attendance updates to submit")
+
     response = await _lms_request(
         "PUT",
         "/attendance/bulk",
         token,
         timeout=60.0,
+        params={"classSessionId": class_session_id},
         headers={"Content-Type": "application/json"},
-        json=updates,
+        json=payload,
     )
     if response.status_code == 400:
         detail = response.json()

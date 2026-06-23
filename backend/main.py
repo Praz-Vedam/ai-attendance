@@ -7,11 +7,8 @@ try:
 except ImportError:
     pass
 
-from local_db import kv_get, kv_set
-
 import json
 import logging
-import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Dict, List, Optional, Tuple
 
@@ -23,6 +20,12 @@ from pydantic import BaseModel
 from lms_attendance_routes import register_routes as register_lms_routes, router as lms_router
 from lms_client import close_lms_client, get_lms_client
 from session_review import init_review_worker, shutdown_review_poller, start_review_poller
+from face_matching import (
+    FACE_API_ONLY_MESSAGE,
+    compare_embeddings,
+    is_face_api_embedding,
+    parse_client_embedding,
+)
 from ml_config import ENABLE_ANTI_SPOOF, ENABLE_LOCATION_DETECTION, DEFER_ML_REVIEW, location_attendance_status, post_mark_review_status
 from student_store import (
     create_session,
@@ -347,7 +350,9 @@ def check_spoof(image_bytes):
 
     confidence = prediction[0][label] / 2
 
-    return label == 1, float(confidence)
+    if label == 1:
+        return True, float(1.0 - confidence)
+    return False, float(confidence)
 
 
 def find_student_by_email(email: str):
@@ -803,101 +808,12 @@ async def mark_attendance(
     }
 
 
-@app.post("/verify-face")
-async def verify_face(file: UploadFile = File(...)):
-    registered = [
-        student
-        for student in list_students()
-        if student_has_face(student)
-    ]
-
-    if len(registered) == 0:
-        return {
-            "success": False,
-            "message": "No registered users found"
-        }
-
-    image_bytes = await file.read()
-
-    is_real, spoof_confidence = check_spoof(image_bytes)
-
-    if not is_real:
-        return {
-            "success": False,
-            "verified": False,
-            "message": "Spoof attack detected",
-            "spoof_confidence": spoof_confidence
-        }
-
-    live_embedding = get_embedding(image_bytes)
-
-    if live_embedding is None:
-        return {
-            "success": False,
-            "message": "No face detected"
-        }
-
-    best_similarity = 0.0
-    detected_person = None
-    detected_email = None
-
-    for user in registered:
-        similarity = cosine_similarity(
-            np.array(user["embedding"]),
-            live_embedding,
-        )
-
-        if similarity > best_similarity:
-            best_similarity = similarity
-            detected_person = user["name"]
-            detected_email = user["email"]
-
-    verified = best_similarity > SIMILARITY_THRESHOLD
-
-    return {
-        "success": True,
-        "verified": bool(verified),
-        "person": detected_person if verified else "Unknown",
-        "email": detected_email if verified else None,
-        "similarity": float(best_similarity),
-        "spoof_confidence": spoof_confidence
-    }
-
-@app.post("/start-attendance")
-def start_attendance():
-
-        kv_set(
-            "attendance:session",
-            json.dumps({
-                "active": True,
-                "started_at": time.time()
-            }),
-            ttl_seconds=30,
-        )
-
-        return {
-            "success": True,
-            "message": "Attendance started"
-        }
-
-
-@app.get("/attendance-session")
-def attendance_session():
-
-    session = kv_get("attendance:session")
-
-    if not session:
-
-        return {
-
-            "active": False
-
-        }
-
-    return json.loads(session)
-
-
-def verify_lms_face(embedding: list, image_bytes: bytes) -> dict:
+def verify_lms_face(
+    embedding: list,
+    image_bytes: bytes,
+    *,
+    live_embedding: Optional[list] = None,
+) -> dict:
     is_real, spoof_confidence = check_spoof(image_bytes)
 
     if not is_real:
@@ -908,7 +824,12 @@ def verify_lms_face(embedding: list, image_bytes: bytes) -> dict:
             "spoof_confidence": spoof_confidence,
         }
 
-    return verify_face_match_only(embedding, image_bytes, spoof_confidence=spoof_confidence)
+    return verify_face_match_only(
+        embedding,
+        image_bytes,
+        spoof_confidence=spoof_confidence,
+        live_embedding=live_embedding,
+    )
 
 
 def verify_face_match_only(
@@ -916,27 +837,29 @@ def verify_face_match_only(
     image_bytes: bytes,
     *,
     spoof_confidence: Optional[float] = None,
+    live_embedding: Optional[list] = None,
 ) -> dict:
-    live_embedding = get_embedding(image_bytes)
-
-    if live_embedding is None:
-        return {
-            "success": False,
-            "message": "No face detected",
-        }
-
     if not embedding:
         return {
             "success": False,
             "message": "Face not registered for this account",
         }
 
-    similarity = cosine_similarity(
-        np.array(embedding),
-        live_embedding,
-    )
+    if live_embedding is None:
+        return {
+            "success": False,
+            "message": FACE_API_ONLY_MESSAGE,
+        }
 
-    verified = similarity > SIMILARITY_THRESHOLD
+    if not is_face_api_embedding(embedding) or not is_face_api_embedding(live_embedding):
+        return {
+            "success": False,
+            "message": FACE_API_ONLY_MESSAGE,
+        }
+
+    live_embedding = embedding_to_list(live_embedding)
+
+    verified, similarity = compare_embeddings(embedding, live_embedding)
 
     result = {
         "success": True,
@@ -975,8 +898,6 @@ register_lms_routes(
     get_client_ip=get_client_ip,
     verify_lms_face=verify_lms_face,
     verify_face_match_only=verify_face_match_only,
-    average_embedding_from_images=average_embedding_from_images,
-    embedding_to_list=embedding_to_list,
     detect_location=detect_location,
     ips_match=ips_match,
 )
