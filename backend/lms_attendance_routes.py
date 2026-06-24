@@ -77,6 +77,7 @@ STUDENT_FACE_MATCH_LOCKED_MESSAGE = (
     "Face verification failed. Attendance was not recorded. "
     "Contact your instructor."
 )
+ALREADY_MARKED_MESSAGE = "Attendance already marked for this session"
 
 
 class LmsAttendanceStartRequest(BaseModel):
@@ -247,6 +248,36 @@ def _face_match_retry_state(class_session_id: int, email: str) -> tuple[int, int
     return next_attempt, retries_remaining
 
 
+def _already_marked_response(
+    result: Dict[str, Any],
+    *,
+    verified: bool,
+    status: Optional[str] = None,
+    reason: Optional[str] = None,
+    location: Optional[str] = None,
+    location_confidence: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Return after full ML verification when attendance is already recorded."""
+    response: Dict[str, Any] = {
+        "success": False,
+        "verified": verified,
+        "already_marked": True,
+        "message": ALREADY_MARKED_MESSAGE,
+        "similarity": result.get("similarity"),
+    }
+    if result.get("spoof_confidence") is not None:
+        response["spoof_confidence"] = result.get("spoof_confidence")
+    if status is not None:
+        response["status"] = status
+    if reason is not None:
+        response["reason"] = reason
+    if location is not None:
+        response["location"] = location
+    if location_confidence is not None:
+        response["location_confidence"] = location_confidence
+    return response
+
+
 def _handle_face_match_failure(
     class_session_id: int,
     *,
@@ -258,7 +289,17 @@ def _handle_face_match_failure(
     student_ip: Optional[str],
     teacher_ip: Optional[str],
     ips_match_fn,
+    already_marked: bool = False,
 ) -> Dict[str, Any]:
+    if already_marked:
+        return {
+            "success": False,
+            "verified": False,
+            "already_marked": True,
+            "similarity": similarity,
+            "message": ALREADY_MARKED_MESSAGE,
+        }
+
     next_attempt, retries_remaining = _face_match_retry_state(class_session_id, email)
     _record_failed_mark_attempt(
         class_session_id,
@@ -751,17 +792,17 @@ def register_routes(
                 "message": LEGACY_FACE_ENROLLMENT_MESSAGE,
             }
 
-        if has_mark(class_session_id, email):
-            return {"success": False, "message": "Attendance already marked for this session"}
+        already_marked = has_mark(class_session_id, email)
 
-        failure = get_mark_failure(class_session_id, email)
-        if failure and int(failure.get("attempt_count") or 0) >= FACE_MATCH_MAX_ATTEMPTS:
-            return {
-                "success": False,
-                "verified": False,
-                "can_retry": False,
-                "message": STUDENT_FACE_MATCH_LOCKED_MESSAGE,
-            }
+        if not already_marked:
+            failure = get_mark_failure(class_session_id, email)
+            if failure and int(failure.get("attempt_count") or 0) >= FACE_MATCH_MAX_ATTEMPTS:
+                return {
+                    "success": False,
+                    "verified": False,
+                    "can_retry": False,
+                    "message": STUDENT_FACE_MATCH_LOCKED_MESSAGE,
+                }
 
         image_bytes = await file.read()
 
@@ -791,6 +832,7 @@ def register_routes(
                 student_ip=get_client_ip(request),
                 teacher_ip=session.get("teacher_ip"),
                 ips_match_fn=ips_match,
+                already_marked=already_marked,
             )
 
         if DEFER_ML_REVIEW:
@@ -821,6 +863,7 @@ def register_routes(
                     student_ip=get_client_ip(request),
                     teacher_ip=session.get("teacher_ip"),
                     ips_match_fn=ips_match,
+                    already_marked=already_marked,
                 )
             return result
 
@@ -832,6 +875,9 @@ def register_routes(
         marked_at = datetime.now(timezone.utc).isoformat()
 
         if DEFER_ML_REVIEW:
+            if already_marked:
+                return _already_marked_response(result, verified=True)
+
             record = {
                 "email": email,
                 "name": name,
@@ -868,6 +914,16 @@ def register_routes(
             detected_location,
             expected_classroom,
         )
+
+        if already_marked:
+            return _already_marked_response(
+                result,
+                verified=True,
+                status=status,
+                reason=reason,
+                location=detected_location,
+                location_confidence=location_result.get("confidence"),
+            )
 
         record = {
             "email": email,

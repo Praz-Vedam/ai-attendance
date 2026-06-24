@@ -15,33 +15,38 @@ from locust_common import (
     LOCUST_USERS,
     MARK_USERS,
     POLL_USERS,
-    STUDENT_TOKENS_FILE,
+    MARK_STUDENT_TOKENS_FILE,
+    POLL_STUDENT_TOKENS_FILE,
     TokenPool,
     auth_headers,
     build_mark_form_data,
     class_session_query,
     face_image_bytes,
+    load_mark_tokens,
+    load_poll_tokens,
     load_token_embeddings,
-    load_tokens,
     mark_delay_seconds,
     record_mark_response,
     validate_mark_prerequisites,
 )
 
-STUDENT_TOKENS = load_tokens(STUDENT_TOKENS_FILE)
-TOKEN_POOL = TokenPool(STUDENT_TOKENS)
+MARK_TOKENS = load_mark_tokens()
+POLL_TOKENS = load_poll_tokens()
+MARK_TOKEN_POOL = TokenPool(MARK_TOKENS)
+POLL_TOKEN_POOL = TokenPool(POLL_TOKENS)
 
 
 @events.init.add_listener
 def on_locust_init(environment=None, **_kwargs) -> None:
-    for message in validate_mark_prerequisites(STUDENT_TOKENS, label="[mark_session]"):
+    for message in validate_mark_prerequisites(MARK_TOKENS, label="[mark_session]"):
         print(f"\n{message}\n")
-    if STUDENT_TOKENS:
-        embeddings = load_token_embeddings(STUDENT_TOKENS)
+    if MARK_TOKENS:
+        embeddings = load_token_embeddings(MARK_TOKENS)
         print(
             f"\n[mark_session] Ready — session={CLASS_SESSION_ID}, "
             f"total_users={LOCUST_USERS} (poll={POLL_USERS}, mark={MARK_USERS}), "
-            f"tokens={len(STUDENT_TOKENS)}, embeddings={len(embeddings)}\n"
+            f"mark_tokens={len(MARK_TOKENS)} ({len(dict.fromkeys(MARK_TOKENS))} unique), "
+            f"poll_tokens={len(POLL_TOKENS)}, embeddings={len(embeddings)}\n"
         )
 
 
@@ -50,7 +55,7 @@ class SessionPoller(HttpUser):
     wait_time = between(1, 3)
 
     def on_start(self) -> None:
-        self.token = TOKEN_POOL.next()
+        self.token = POLL_TOKEN_POOL.next()
 
     @task
     def student_status(self) -> None:
@@ -73,7 +78,7 @@ class ConcurrentMarkStudent(HttpUser):
     wait_time = constant(3600)
 
     def on_start(self) -> None:
-        token = TOKEN_POOL.next()
+        token = MARK_TOKEN_POOL.next()
         if not token or CLASS_SESSION_ID <= 0:
             return
 

@@ -16,6 +16,9 @@ LOCAL_ENV = LOAD_TESTS_DIR / "local.env"
 SECRETS_ENV = LOAD_TESTS_DIR / "secrets.env"
 FACE_FIXTURE = LOAD_TESTS_DIR / "fixtures" / "sample.jpg"
 STUDENT_EMBEDDINGS_FILE = LOAD_TESTS_DIR / "student_embeddings.json"
+STUDENT_REFRESH_TOKENS_FILE = LOAD_TESTS_DIR / "student_refresh_tokens.txt"
+DEFAULT_MARK_STUDENT_TOKENS = LOAD_TESTS_DIR / "student_tokens_mark.txt"
+DEFAULT_POLL_STUDENT_TOKENS = LOAD_TESTS_DIR / "student_tokens_poll.txt"
 
 DEFAULT_LMS_BASE = "http://localhost:9090"
 FACE_API_DIM = 128
@@ -234,31 +237,180 @@ def resolve_teacher_token(
     return None
 
 
+def parse_bulk_tokens(raw: str) -> list[str]:
+    """Split comma- or newline-separated token lists from env vars."""
+    if not raw.strip():
+        return []
+    parts = raw.replace("\n", ",").split(",")
+    return [part.strip().removeprefix("Bearer ").strip() for part in parts if part.strip()]
+
+
+def read_refresh_token_lines(path: Optional[Path] = None) -> list[str]:
+    path = path or STUDENT_REFRESH_TOKENS_FILE
+    tokens = read_token_lines(path)
+    if tokens:
+        return tokens
+
+    bulk = os.getenv("LOAD_TEST_STUDENT_REFRESH_TOKENS", "").strip()
+    if bulk:
+        return parse_bulk_tokens(bulk)
+
+    single = os.getenv("LOAD_TEST_STUDENT_REFRESH_TOKEN", "").strip()
+    return [single] if single else []
+
+
+def collect_student_access_candidates(
+    *,
+    student_tokens_file: Optional[Path] = None,
+) -> list[str]:
+    """Ordered deduped access-token candidates (not yet validated)."""
+    path = student_tokens_file or (LOAD_TESTS_DIR / "student_tokens.txt")
+    candidates: list[str] = []
+
+    def add(raw: str) -> None:
+        token = raw.strip().removeprefix("Bearer ").strip()
+        if token and token not in candidates:
+            candidates.append(token)
+
+    for token in read_token_lines(path):
+        add(token)
+    for token in parse_bulk_tokens(os.getenv("LOAD_TEST_STUDENT_ACCESS_TOKENS", "")):
+        add(token)
+    add(os.getenv("LOAD_TEST_STUDENT_ACCESS_TOKEN", ""))
+    return candidates
+
+
+def student_email_from_token(access_token: str) -> Optional[str]:
+    detail = auth_detail(access_token)
+    if not detail:
+        return None
+    person = detail.get("personDetail") or {}
+    email = (person.get("email") or "").strip().lower()
+    return email or None
+
+
+def resolve_distinct_student_tokens(
+    *,
+    class_session_id: int = 0,
+    student_tokens_file: Optional[Path] = None,
+    refresh_tokens_file: Optional[Path] = None,
+    min_count: int = 0,
+) -> list[str]:
+    """
+    Validated unique student access tokens — one entry per enrolled student email.
+
+  Sources (first wins per email):
+    - student_tokens.txt / student_tokens_file
+    - LOAD_TEST_STUDENT_ACCESS_TOKENS / LOAD_TEST_STUDENT_ACCESS_TOKEN
+    - student_refresh_tokens.txt / LOAD_TEST_STUDENT_REFRESH_TOKENS / LOAD_TEST_STUDENT_REFRESH_TOKEN
+    """
+    if class_session_id <= 0:
+        class_session_id = int(os.getenv("CLASS_SESSION_ID") or 0)
+
+    valid: list[str] = []
+    seen_tokens: set[str] = set()
+    seen_emails: set[str] = set()
+
+    def accept(token: str) -> None:
+        if not token or token in seen_tokens:
+            return
+        if not is_valid_token(token, class_session_id=class_session_id, student=True):
+            return
+        email = student_email_from_token(token)
+        if email and email in seen_emails:
+            return
+        seen_tokens.add(token)
+        if email:
+            seen_emails.add(email)
+        valid.append(token)
+
+    for token in collect_student_access_candidates(student_tokens_file=student_tokens_file):
+        accept(token)
+
+    for refresh in read_refresh_token_lines(refresh_tokens_file):
+        resolved = refresh_access_token(refresh)
+        if resolved:
+            accept(resolved)
+
+    if min_count > 0 and len(valid) < min_count:
+        return valid
+    return valid
+
+
 def resolve_student_access_tokens(
     *,
     class_session_id: int = 0,
     student_tokens_file: Optional[Path] = None,
 ) -> list[str]:
-    path = student_tokens_file or (LOAD_TESTS_DIR / "student_tokens.txt")
-    if class_session_id <= 0:
-        class_session_id = int(os.getenv("CLASS_SESSION_ID") or 0)
-    candidates: list[str] = []
-    for raw in (os.getenv("LOAD_TEST_STUDENT_ACCESS_TOKEN", "").strip(),):
-        if raw and raw not in candidates:
-            candidates.append(raw)
-    refresh = os.getenv("LOAD_TEST_STUDENT_REFRESH_TOKEN", "").strip()
-    if refresh:
-        resolved = refresh_access_token(refresh)
-        if resolved and resolved not in candidates:
-            candidates.append(resolved)
-    for token in read_token_lines(path):
-        if token not in candidates:
-            candidates.append(token)
-    return [
-        t
-        for t in candidates
-        if is_valid_token(t, class_session_id=class_session_id, student=True)
-    ]
+    return resolve_distinct_student_tokens(
+        class_session_id=class_session_id,
+        student_tokens_file=student_tokens_file,
+    )
+
+
+def resolve_student_tokens(
+    student_tokens_file: Path,
+    *,
+    class_session_id: int = 0,
+) -> list[str]:
+    """Backward-compatible alias used by find_mark_breakpoint.py."""
+    return resolve_distinct_student_tokens(
+        class_session_id=class_session_id,
+        student_tokens_file=student_tokens_file,
+    )
+
+
+def replicate_tokens(tokens: list[str], count: int) -> list[str]:
+    """Repeat tokens in order until count lines (for polling load)."""
+    unique = [token for token in dict.fromkeys(tokens) if token]
+    if not unique or count <= 0:
+        return []
+    if len(unique) >= count:
+        return unique[:count]
+    return (unique * ((count // len(unique)) + 1))[:count]
+
+
+def assign_mark_and_poll_tokens(
+    access_tokens: list[str],
+    *,
+    mark_users: int,
+    poll_users: int,
+    allow_duplicate_marks: bool = False,
+) -> tuple[list[str], list[str]]:
+    """
+    Build token lists for mark vs poll Locust users.
+
+    Mark users get distinct tokens (one face-verification path per student).
+    Poll users may reuse tokens.
+    """
+    unique = [token for token in dict.fromkeys(access_tokens) if token]
+    if mark_users > 0 and not unique:
+        raise ValueError("No student access tokens available for mark users")
+
+    if mark_users > len(unique):
+        if allow_duplicate_marks:
+            mark_tokens = replicate_tokens(unique, mark_users)
+        else:
+            raise ValueError(
+                f"Need {mark_users} distinct enrolled student token(s) for mark users, "
+                f"but only {len(unique)} found. Add tokens to "
+                f"{STUDENT_REFRESH_TOKENS_FILE.name} or LOAD_TEST_STUDENT_ACCESS_TOKENS, "
+                "or set ALLOW_DUPLICATE_MARK_TOKENS=1 to allow repeated marks "
+                "(skips face verification after the first mark per student)."
+            )
+    else:
+        mark_tokens = unique[:mark_users]
+
+    poll_tokens = replicate_tokens(unique, poll_users) if poll_users > 0 else []
+    return mark_tokens, poll_tokens
+
+
+def allow_duplicate_mark_tokens() -> bool:
+    return os.getenv("ALLOW_DUPLICATE_MARK_TOKENS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def read_token_lines(path: Path) -> list[str]:

@@ -18,34 +18,36 @@ from locust_common import (
     CLASS_SESSION_ID,
     MARK_USERS,
     POLL_USERS,
-    STUDENT_TOKENS_FILE,
     TEACHER_TOKEN,
     TokenPool,
     auth_headers,
     build_mark_form_data,
     class_session_query,
     face_image_bytes,
+    load_mark_tokens,
+    load_poll_tokens,
     load_token_embeddings,
-    load_tokens,
     mark_delay_seconds,
     record_mark_response,
     validate_mark_prerequisites,
     validate_polling_prerequisites,
 )
 
-STUDENT_TOKENS = load_tokens(STUDENT_TOKENS_FILE)
-TOKEN_POOL = TokenPool(STUDENT_TOKENS)
+MARK_TOKENS = load_mark_tokens()
+POLL_TOKENS = load_poll_tokens()
+MARK_TOKEN_POOL = TokenPool(MARK_TOKENS)
+POLL_TOKEN_POOL = TokenPool(POLL_TOKENS)
 
 
 @events.init.add_listener
 def on_locust_init(environment=None, **_kwargs) -> None:
-    for message in validate_polling_prerequisites(STUDENT_TOKENS, label="[throughput]"):
+    for message in validate_polling_prerequisites(POLL_TOKENS, label="[throughput]"):
         print(f"\n{message}\n")
     if MARK_USERS > 0:
-        for message in validate_mark_prerequisites(STUDENT_TOKENS, label="[throughput]"):
+        for message in validate_mark_prerequisites(MARK_TOKENS, label="[throughput]"):
             print(f"\n{message}\n")
-        if STUDENT_TOKENS:
-            load_token_embeddings(STUDENT_TOKENS)
+        if MARK_TOKENS:
+            load_token_embeddings(MARK_TOKENS)
     if not TEACHER_TOKEN:
         print(
             "\n[throughput] WARNING: TEACHER_TOKEN is not set. "
@@ -72,7 +74,7 @@ class LmsStudentPoller(_BaseUser):
     wait_time = between(1, 3)
 
     def on_start(self) -> None:
-        self.token = TOKEN_POOL.next()
+        self.token = POLL_TOKEN_POOL.next()
 
     @task(5)
     def student_status(self) -> None:
@@ -106,7 +108,7 @@ class LmsBurstMarker(_BaseUser):
     wait_time = constant(3600)
 
     def on_start(self) -> None:
-        token = TOKEN_POOL.next()
+        token = MARK_TOKEN_POOL.next()
         if not token or CLASS_SESSION_ID <= 0:
             return
 

@@ -7,15 +7,12 @@ try:
 except ImportError:
     pass
 
-import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Annotated, Dict, List, Optional, Tuple
+from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
-from pydantic import BaseModel
 
 from lms_attendance_routes import register_routes as register_lms_routes, router as lms_router
 from lms_client import close_lms_client, get_lms_client
@@ -24,20 +21,8 @@ from face_matching import (
     FACE_API_ONLY_MESSAGE,
     compare_embeddings,
     is_face_api_embedding,
-    parse_client_embedding,
 )
-from ml_config import ENABLE_ANTI_SPOOF, ENABLE_LOCATION_DETECTION, DEFER_ML_REVIEW, location_attendance_status, post_mark_review_status
-from student_store import (
-    create_session,
-    create_student_with_face,
-    get_session_email,
-    get_student,
-    list_students,
-    student_has_face,
-    upsert_face,
-)
-
-from insightface.app import FaceAnalysis
+from ml_config import ENABLE_ANTI_SPOOF, ENABLE_LOCATION_DETECTION, post_mark_review_status
 
 from src.anti_spoof_predict import AntiSpoofPredict
 from src.generate_patches import CropImage
@@ -47,7 +32,6 @@ import numpy as np
 from PIL import Image
 import io
 import os
-from datetime import datetime, timezone
 import joblib
 import torch
 from transformers import AutoImageProcessor, AutoModel
@@ -147,13 +131,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("Loading InsightFace models...")
-
-face_app = FaceAnalysis(name="buffalo_l")
-face_app.prepare(ctx_id=-1)
-
-print("InsightFace models loaded")
-
 logging.info(
     "ML flags: ENABLE_ANTI_SPOOF=%s ENABLE_LOCATION_DETECTION=%s",
     ENABLE_ANTI_SPOOF,
@@ -195,20 +172,6 @@ CLASS_NAMES = {
     3: "Non-Classroom"
 }
 
-attendance_active = False
-attendance_started_at = None
-attendance_session_ip: Optional[str] = None
-attendance_expected_classroom: Optional[str] = None
-attendance_records = []
-
-SIMILARITY_THRESHOLD = 0.45
-SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
-MIN_SIGNUP_SCANS = 1
-
-
-class AttendanceStartRequest(BaseModel):
-    classroom: str
-
 
 def get_client_ip(request: Request) -> Optional[str]:
     forwarded = request.headers.get("x-forwarded-for")
@@ -225,89 +188,12 @@ def ips_match(admin_ip: Optional[str], student_ip: Optional[str]) -> bool:
     return admin_ip == student_ip
 
 
-def marked_student_public(record: dict) -> dict:
-    payload = {
-        "email": record["email"],
-        "name": record["name"],
-        "marked_at": record["marked_at"],
-        "ip_match": record.get("ip_match", True),
-        "student_ip": record.get("student_ip"),
-        "location": record.get("location"),
-        "location_confidence": record.get(
-            "location_confidence"
-        ),
-        "status": record.get("status", "Present"),
-        "reason": record.get("reason"),
-    }
-    if record.get("snapshot"):
-        payload["has_snapshot"] = True
-    return payload
-
-
-def attendance_status_public() -> dict:
-    return {
-        "active": attendance_active,
-        "started_at": attendance_started_at,
-        "teacher_ip": attendance_session_ip,
-        "expected_classroom": attendance_expected_classroom,
-        "marked_count": len(attendance_records),
-        "marked_students": [
-            marked_student_public(record)
-            for record in attendance_records
-        ],
-    }
-
-
-def student_public_profile(student: Dict) -> Dict:
-    return {
-        "email": student["email"],
-        "student_id": student.get("student_id", student["email"].split("@")[0]),
-        "name": student["name"],
-        "face_registered": student_has_face(student),
-        "face_registered_at": student.get("face_registered_at"),
-        "created_at": student.get("created_at"),
-    }
-
-
-def require_student(
-    authorization: Annotated[Optional[str], Header()] = None,
-) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    token = authorization.removeprefix("Bearer ").strip()
-    email = get_session_email(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Session expired or invalid")
-
-    student = get_student(email)
-    if not student:
-        raise HTTPException(status_code=401, detail="Student account not found")
-
-    return student
-
-
 def embedding_to_list(embedding) -> list[float]:
     arr = np.array(embedding, dtype=np.float64)
     norm = np.linalg.norm(arr)
     if norm > 0:
         arr = arr / norm
     return [float(x) for x in arr]
-
-
-def get_embedding(image_bytes):
-    image = Image.open(
-        io.BytesIO(image_bytes)
-    ).convert("RGB")
-
-    image_np = np.array(image)
-
-    faces = face_app.get(image_np)
-
-    if len(faces) == 0:
-        return None
-
-    return faces[0].embedding
 
 
 def check_spoof(image_bytes):
@@ -353,17 +239,6 @@ def check_spoof(image_bytes):
     if label == 1:
         return True, float(1.0 - confidence)
     return False, float(confidence)
-
-
-def find_student_by_email(email: str):
-    return get_student(email)
-
-
-def cosine_similarity(a, b):
-    return float(
-        np.dot(a, b)
-        / (np.linalg.norm(a) * np.linalg.norm(b))
-    )
 
 
 def get_location_embedding(image_bytes):
@@ -426,385 +301,10 @@ def detect_location(image_bytes):
     }
 
 
-def average_embedding_from_images(image_bytes_list: List[bytes]):
-    vectors = []
-    for image_bytes in image_bytes_list:
-        embedding = get_embedding(image_bytes)
-        if embedding is not None:
-            vectors.append(embedding)
-    if not vectors:
-        return None
-    return np.mean(vectors, axis=0)
-
-
-def find_student_by_face(embedding) -> Tuple[Optional[Dict], float]:
-    best_similarity = 0.0
-    best_student = None
-
-    for student in list_students():
-        if not student_has_face(student):
-            continue
-        similarity = cosine_similarity(
-            np.array(student["embedding"]),
-            embedding,
-        )
-        if similarity > best_similarity:
-            best_similarity = similarity
-            best_student = student
-
-    return best_student, best_similarity
-
-
-def verify_student_face(email: str, image_bytes):
-    student = find_student_by_email(email)
-
-    if student is None:
-        return {
-            "success": False,
-            "message": "Student not registered",
-        }
-
-    is_real, spoof_confidence = check_spoof(image_bytes)
-
-    if not is_real:
-        return {
-            "success": False,
-            "verified": False,
-            "message": "Spoof attack detected",
-            "spoof_confidence": spoof_confidence,
-        }
-
-    live_embedding = get_embedding(image_bytes)
-
-    if live_embedding is None:
-        return {
-            "success": False,
-            "message": "No face detected",
-        }
-
-    if not student_has_face(student):
-        return {
-            "success": False,
-            "message": "Face not registered for this account",
-        }
-
-    similarity = cosine_similarity(
-        np.array(student["embedding"]),
-        live_embedding,
-    )
-
-    verified = similarity > SIMILARITY_THRESHOLD
-
-    return {
-        "success": True,
-        "verified": bool(verified),
-        "similarity": similarity,
-        "spoof_confidence": spoof_confidence,
-        "message": (
-            "Identity verified"
-            if verified
-            else "Face does not match registered student"
-        ),
-    }
-
-
 @app.get("/")
 def home():
     return {
         "message": "AI Proctoring Backend Running"
-    }
-
-
-@app.post("/register-student")
-async def register_student(
-    name: str = Form(...),
-    files: List[UploadFile] = File(...),
-):
-    display_name = name.strip()
-    if not display_name:
-        return {"success": False, "message": "Name is required"}
-
-    if len(files) < MIN_SIGNUP_SCANS:
-        return {
-            "success": False,
-            "message": f"At least {MIN_SIGNUP_SCANS} face scan is required",
-        }
-
-    image_bytes_list = [await upload.read() for upload in files]
-    embedding = average_embedding_from_images(image_bytes_list)
-
-    if embedding is None:
-        return {
-            "success": False,
-            "message": "No face detected in the scans. Try better lighting.",
-        }
-
-    existing, similarity = find_student_by_face(embedding)
-    if existing is not None and similarity > SIMILARITY_THRESHOLD:
-        return {
-            "success": False,
-            "message": "This face is already registered",
-        }
-
-    student = create_student_with_face(
-        display_name,
-        embedding_to_list(embedding),
-    )
-    token = create_session(student["email"], SESSION_TTL_SECONDS)
-
-    student_id = student["student_id"]
-
-    return {
-        "success": True,
-        "message": f"{student['name']} enrolled successfully",
-        "id": student_id,
-        "student_id": student_id,
-        "token": token,
-        "student": student_public_profile(student),
-        "scans_used": len(files),
-    }
-
-
-@app.post("/auth/login")
-async def login(file: UploadFile = File(...)):
-    image_bytes = await file.read()
-    embedding = get_embedding(image_bytes)
-
-    if embedding is None:
-        return {"success": False, "message": "No face detected"}
-
-    student, similarity = find_student_by_face(embedding)
-
-    if student is None or similarity <= SIMILARITY_THRESHOLD:
-        return {
-            "success": False,
-            "message": "Face not recognized. Sign up first.",
-            "similarity": float(similarity),
-        }
-
-    token = create_session(student["email"], SESSION_TTL_SECONDS)
-
-    return {
-        "success": True,
-        "message": f"Welcome back, {student['name']}",
-        "token": token,
-        "student": student_public_profile(student),
-        "similarity": float(similarity),
-    }
-
-
-@app.get("/auth/me")
-def me(student: dict = Depends(require_student)):
-    return {
-        "success": True,
-        "student": student_public_profile(student),
-    }
-
-
-@app.get("/students")
-def students_for_teacher():
-    return {
-        "success": True,
-        "students": [
-            student_public_profile(student)
-            for student in list_students()
-        ],
-    }
-
-
-@app.post("/register-face")
-async def register_face(
-    file: UploadFile = File(...),
-    name: str = Form(...),
-    student: dict = Depends(require_student),
-):
-    display_name = name.strip()
-    if not display_name:
-        return {"success": False, "message": "Name is required"}
-
-    image_bytes = await file.read()
-
-    embedding = get_embedding(image_bytes)
-
-    if embedding is None:
-        return {
-            "success": False,
-            "message": "No face detected"
-        }
-
-    updated = upsert_face(
-        student["email"],
-        embedding_to_list(embedding),
-        display_name,
-    )
-
-    if updated is None:
-        return {"success": False, "message": "Student account not found"}
-
-    return {
-        "success": True,
-        "message": f"{updated['name']} registered successfully",
-        "student": student_public_profile(updated),
-        "total_users": len(list_students()),
-    }
-
-
-@app.post("/attendance/start")
-def start_attendance(
-    request: Request,
-    payload: AttendanceStartRequest,
-):
-    global attendance_active, attendance_started_at, attendance_records, attendance_session_ip, attendance_expected_classroom
-
-    if attendance_active:
-        return {
-            "success": False,
-            "message": "Attendance session is already active",
-            "started_at": attendance_started_at,
-        }
-
-    attendance_active = True
-    attendance_started_at = datetime.now(timezone.utc).isoformat()
-    attendance_session_ip = get_client_ip(request)
-    attendance_expected_classroom = payload.classroom
-    attendance_records = []
-
-    return {
-        "success": True,
-        "message": "Attendance session started",
-        "started_at": attendance_started_at,
-        "classroom": attendance_expected_classroom,
-    }
-
-
-@app.post("/attendance/stop")
-def stop_attendance():
-    global attendance_active, attendance_started_at, attendance_expected_classroom
-
-    if not attendance_active:
-        return {
-            "success": False,
-            "message": "No active attendance session",
-        }
-
-    attendance_active = False
-    attendance_expected_classroom = None
-
-    payload = attendance_status_public()
-    return {
-        "success": True,
-        "message": "Attendance session stopped",
-        "marked_count": payload["marked_count"],
-        "marked_students": payload["marked_students"],
-        "teacher_ip": payload["teacher_ip"],
-    }
-
-
-@app.get("/attendance/status")
-def attendance_status():
-    return attendance_status_public()
-
-
-@app.get("/attendance/snapshot/{email}")
-def attendance_snapshot(email: str):
-    for record in attendance_records:
-        if record["email"] == email:
-            snapshot = record.get("snapshot")
-            if snapshot:
-                return Response(content=snapshot, media_type="image/jpeg")
-            break
-    raise HTTPException(status_code=404, detail="Snapshot not found")
-
-
-@app.get("/students/me/status")
-def student_status(student: dict = Depends(require_student)):
-    email = student["email"]
-    already_marked = any(
-        record["email"] == email
-        for record in attendance_records
-    )
-
-    profile = student_public_profile(student)
-
-    return {
-        "student_id": email,
-        "email": email,
-        "name": student["name"],
-        "registered": profile["face_registered"],
-        "attendance_active": attendance_active,
-        "already_marked": already_marked,
-    }
-
-
-@app.post("/students/me/mark-attendance")
-async def mark_attendance(
-    request: Request,
-    file: UploadFile = File(...),
-    student: dict = Depends(require_student),
-):
-    global attendance_records
-
-    email = student["email"]
-
-    if not attendance_active:
-        return {
-            "success": False,
-            "message": "Attendance session is not active",
-        }
-
-    if any(record["email"] == email for record in attendance_records):
-        return {
-            "success": False,
-            "message": "Attendance already marked for this session",
-        }
-
-    image_bytes = await file.read()
-    result = verify_student_face(email, image_bytes)
-
-    if not result.get("success") or not result.get("verified"):
-        return result
-
-    marked_at = datetime.now(timezone.utc).isoformat()
-    student_ip = get_client_ip(request)
-    ip_match = ips_match(attendance_session_ip, student_ip)
-
-    location_result = detect_location(
-        image_bytes
-    )
-
-    detected_location = location_result["location"]
-    status, reason = location_attendance_status(
-        detected_location,
-        attendance_expected_classroom,
-    )
-
-    attendance_records.append({
-        "email": email,
-        "name": student["name"],
-        "marked_at": marked_at,
-        "similarity": result["similarity"],
-        "student_ip": student_ip,
-        "ip_match": ip_match,
-        "snapshot": image_bytes,
-        "location": detected_location,
-        "location_confidence": location_result["confidence"],
-        "status": status,
-        "reason": reason,
-    })
-
-    return {
-        "success": True,
-        "verified": True,
-        "message": "Attendance marked successfully",
-        "similarity": result["similarity"],
-        "spoof_confidence": result["spoof_confidence"],
-        "marked_at": marked_at,
-        "ip_match": ip_match,
-        "location": detected_location,
-        "location_confidence": location_result["confidence"],
-        "status": status,
-        "reason": reason,
-        "student": student_public_profile(student),
     }
 
 

@@ -22,58 +22,39 @@ sys.path.insert(0, str(LOAD_TESTS_DIR))
 
 from env_util import (  # noqa: E402
     BACKEND_DIR,
+    DEFAULT_MARK_STUDENT_TOKENS,
+    DEFAULT_POLL_STUDENT_TOKENS,
     LOCAL_ENV,
     SECRETS_ENV,
+    STUDENT_REFRESH_TOKENS_FILE,
     ai_attendance_base,
+    allow_duplicate_mark_tokens,
+    assign_mark_and_poll_tokens,
     find_active_class_session_id,
     load_dotenv,
     load_secrets_env,
     parse_env_file,
     read_token_lines,
+    resolve_distinct_student_tokens,
     resolve_mark_embeddings,
-    resolve_student_access_tokens,
     resolve_teacher_token,
     start_attendance_session,
     write_env_file,
     write_token_lines,
 )
 
-STUDENT_REFRESH_TOKENS_FILE = LOAD_TESTS_DIR / "student_refresh_tokens.txt"
-STUDENT_MARK_TOKENS_FILE = LOAD_TESTS_DIR / "student_tokens_mark.txt"
+STUDENT_MARK_TOKENS_FILE = DEFAULT_MARK_STUDENT_TOKENS
+STUDENT_POLL_TOKENS_FILE = DEFAULT_POLL_STUDENT_TOKENS
 STUDENT_EMBEDDINGS_FILE = LOAD_TESTS_DIR / "student_embeddings.json"
 DEFAULT_MARK_USERS = 100
 DEFAULT_LOCUST_USERS = 300
 
 
-def _read_refresh_tokens() -> list[str]:
-    tokens = read_token_lines(STUDENT_REFRESH_TOKENS_FILE)
-    if tokens:
-        return tokens
-
-    bulk = os.getenv("LOAD_TEST_STUDENT_REFRESH_TOKENS", "").strip()
-    if bulk:
-        return [part.strip() for part in bulk.replace("\n", ",").split(",") if part.strip()]
-
-    single = os.getenv("LOAD_TEST_STUDENT_REFRESH_TOKEN", "").strip()
-    if single:
-        return [single]
-
-    return []
-
-
 def _resolve_student_tokens(class_session_id: int) -> list[str]:
-    tokens = resolve_student_access_tokens(class_session_id=class_session_id)
-    if tokens:
-        return tokens
-
-    access_tokens: list[str] = []
-    for refresh in _read_refresh_tokens():
-        from env_util import is_valid_token, refresh_access_token
-
-        token = refresh_access_token(refresh)
-        if token and is_valid_token(token, class_session_id=class_session_id, student=True):
-            access_tokens.append(token)
-    return list(dict.fromkeys(access_tokens))
+    return resolve_distinct_student_tokens(
+        class_session_id=class_session_id,
+        refresh_tokens_file=STUDENT_REFRESH_TOKENS_FILE,
+    )
 
 
 def main() -> int:
@@ -138,27 +119,40 @@ def main() -> int:
     if not access_tokens:
         print(
             "[prepare_mark_session] No valid student token — check LOAD_TEST_STUDENT_* "
-            "in load_tests/secrets.env",
+            f"in load_tests/secrets.env or add refresh tokens to {STUDENT_REFRESH_TOKENS_FILE.name}",
             file=sys.stderr,
         )
         return 1
 
     unique_count = len(access_tokens)
-    if unique_count == 1:
-        print(
-            f"[prepare_mark_session] 1 student token — {locust_users} virtual users "
-            f"({mark_users} mark requests); expect ≤1 successful mark per enrolled student."
+    try:
+        mark_tokens, poll_tokens = assign_mark_and_poll_tokens(
+            access_tokens,
+            mark_users=mark_users,
+            poll_users=max(locust_users - mark_users, 0),
+            allow_duplicate_marks=allow_duplicate_mark_tokens(),
         )
-    elif unique_count < mark_users:
+    except ValueError as exc:
+        print(f"[prepare_mark_session] {exc}", file=sys.stderr)
+        return 1
+
+    if unique_count < mark_users and not allow_duplicate_mark_tokens():
         print(
-            f"[prepare_mark_session] {unique_count} student token(s) for {mark_users} mark users."
+            f"[prepare_mark_session] {unique_count} distinct student(s) for "
+            f"{mark_users} mark users — each mark user gets a unique token "
+            f"(face verification under load)."
+        )
+    elif unique_count == 1 and allow_duplicate_mark_tokens():
+        print(
+            f"[prepare_mark_session] 1 student token — {mark_users} mark requests; "
+            "only the first mark per student runs face verification."
         )
 
-    final_tokens = (access_tokens * ((locust_users // unique_count) + 1))[:locust_users]
-    write_token_lines(STUDENT_MARK_TOKENS_FILE, final_tokens)
+    write_token_lines(STUDENT_MARK_TOKENS_FILE, mark_tokens)
+    write_token_lines(STUDENT_POLL_TOKENS_FILE, poll_tokens)
 
     embeddings = resolve_mark_embeddings(
-        dict.fromkeys(final_tokens),
+        mark_tokens,
         embeddings_file=STUDENT_EMBEDDINGS_FILE,
         fallback_embedding_json=os.getenv("FACE_EMBEDDING_JSON", "").strip(),
     )
@@ -174,7 +168,9 @@ def main() -> int:
     env_values = {
         **existing,
         "CLASS_SESSION_ID": str(class_session_id),
-        "STUDENT_TOKENS_FILE": str(STUDENT_MARK_TOKENS_FILE),
+        "STUDENT_TOKENS_FILE": str(STUDENT_POLL_TOKENS_FILE),
+        "MARK_STUDENT_TOKENS_FILE": str(STUDENT_MARK_TOKENS_FILE),
+        "POLL_STUDENT_TOKENS_FILE": str(STUDENT_POLL_TOKENS_FILE),
         "STUDENT_EMBEDDINGS_FILE": str(STUDENT_EMBEDDINGS_FILE),
         "FACE_IMAGE_PATH": face_path,
         "MARK_USERS": str(mark_users),
@@ -189,8 +185,13 @@ def main() -> int:
     write_env_file(LOCAL_ENV, env_values)
 
     print(
-        f"[prepare_mark_session] Wrote {len(final_tokens)} token slot(s) → {STUDENT_MARK_TOKENS_FILE}"
+        f"[prepare_mark_session] Wrote {len(mark_tokens)} mark token(s) → {STUDENT_MARK_TOKENS_FILE}"
     )
+    if poll_tokens:
+        print(
+            f"[prepare_mark_session] Wrote {len(poll_tokens)} poll token(s) → "
+            f"{STUDENT_POLL_TOKENS_FILE}"
+        )
     print(
         f"[prepare_mark_session] Resolved {len(embeddings)} face-api embedding(s) → "
         f"{STUDENT_EMBEDDINGS_FILE}"
