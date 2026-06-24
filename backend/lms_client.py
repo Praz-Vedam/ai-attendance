@@ -213,11 +213,11 @@ async def get_face_embedding(token: str) -> Dict[str, Any]:
 async def get_face_status_by_email(token: str, email: str) -> Dict[str, Any]:
     response = await _lms_request(
         "GET",
-        "/person/face/status/by-email",
+        "/person/face/status",
         token,
         params={"email": email},
     )
-    _raise_for_lms_response(response, "/person/face/status/by-email")
+    _raise_for_lms_response(response, "/person/face/status")
     return _unwrap_lms_response(response.json())
 
 
@@ -240,11 +240,14 @@ async def register_face_embedding(token: str, embedding: List[float]) -> None:
 async def get_bulk_face_embeddings(token: str, class_session_id: int) -> Dict[str, Any]:
     """Fetch enrolled students' face data for a class session from LMS."""
     response = await _lms_request(
-        "POST",
+        "GET",
         "/person/face/bulk",
         token,
-        headers={"Content-Type": "application/json"},
-        json={"classSessionId": class_session_id},
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        params={"classSessionId": class_session_id},
     )
     _raise_for_lms_response(response, "/person/face/bulk")
     data = _unwrap_lms_response(response.json())

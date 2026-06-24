@@ -16,9 +16,11 @@ from lms_client import (
     bulk_update_attendance,
     get_attendance_records,
     get_bulk_face_embeddings,
+    get_face_embedding,
     get_face_status_by_email,
     import_attendance,
     parse_bulk_face_data_response,
+    parse_face_embedding,
     register_face_embedding,
     validate_lms_token,
 )
@@ -33,10 +35,12 @@ from lms_redis_store import (
     add_mark,
     add_mark_failure,
     cache_face_embedding,
+    cache_session_face_embedding,
     cache_session_face_embeddings,
     cache_session_face_roster,
     clear_session,
     clear_mark_failure,
+    get_cached_face_embedding,
     get_failure_snapshot,
     get_mark,
     get_mark_failure,
@@ -146,6 +150,49 @@ def _map_lms_status(_ai_status: str) -> str:
     return "PRESENT"
 
 
+async def _resolve_stored_face_embedding(
+    token: str,
+    class_session_id: int,
+    email: str,
+) -> Optional[List[float]]:
+    """
+    Resolve enrolled face embedding for marking.
+
+    Session Redis is populated when the teacher starts attendance. Fall back to
+    the per-email cache (set on /face/register) and LMS when missing — e.g.
+    student enrolled after the session started.
+    """
+    stored_embedding = get_session_face_embedding(class_session_id, email)
+    if stored_embedding:
+        return stored_embedding
+
+    stored_embedding = get_cached_face_embedding(email)
+    if stored_embedding:
+        cache_session_face_embedding(class_session_id, email, stored_embedding)
+        return stored_embedding
+
+    try:
+        face_data = await get_face_embedding(token)
+    except Exception:
+        logger.warning(
+            "[LMS] Could not load face embedding for %s during mark",
+            email,
+            exc_info=True,
+        )
+        return None
+
+    if not face_data.get("hasFaceData"):
+        return None
+
+    stored_embedding = parse_face_embedding(face_data.get("faceJson"))
+    if not stored_embedding:
+        return None
+
+    cache_session_face_embedding(class_session_id, email, stored_embedding)
+    cache_face_embedding(email, stored_embedding)
+    return stored_embedding
+
+
 async def _bootstrap_session_face_data(
     token: str,
     class_session_id: int,
@@ -153,7 +200,7 @@ async def _bootstrap_session_face_data(
     """
     Load enrolled students' face embeddings from LMS bulk API into Redis session.
 
-    Admin portal -> POST /lms/attendance/start -> LMS POST /person/face/bulk
+    Admin portal -> POST /lms/attendance/start -> LMS GET /person/face/bulk
     """
     bulk_face_data = await get_bulk_face_embeddings(token, class_session_id)
     parsed = parse_bulk_face_data_response(bulk_face_data)
@@ -604,8 +651,15 @@ def register_routes(
             email = row.get("email") or ""
             email_lower = email.lower()
             face_meta = session_face_roster.get(email_lower)
+            face_registered_at: Optional[str] = None
             if face_meta is not None:
                 face_registered = bool(face_meta.get("hasFaceData"))
+                if face_registered:
+                    try:
+                        face_status = await get_face_status_by_email(token, email)
+                        face_registered_at = face_status.get("registeredAt")
+                    except Exception:
+                        pass
             else:
                 face_status = {"hasFaceData": False}
                 try:
@@ -613,12 +667,14 @@ def register_routes(
                 except Exception:
                     pass
                 face_registered = bool(face_status.get("hasFaceData"))
+                if face_registered:
+                    face_registered_at = face_status.get("registeredAt")
             return {
                 "email": email,
                 "name": row.get("personName") or email,
                 "attendance_id": row.get("attendanceId"),
                 "face_registered": face_registered,
-                "face_registered_at": None,
+                "face_registered_at": face_registered_at,
                 "lms_status": row.get("status"),
                 "marked": email_lower in marks_by_email,
                 "mark": marks_by_email.get(email_lower),
@@ -678,7 +734,11 @@ def register_routes(
         if not email:
             return {"success": False, "message": "User email not found"}
 
-        stored_embedding = get_session_face_embedding(class_session_id, email)
+        stored_embedding = await _resolve_stored_face_embedding(
+            token,
+            class_session_id,
+            email,
+        )
         if not stored_embedding:
             return {
                 "success": False,

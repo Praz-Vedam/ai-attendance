@@ -381,6 +381,22 @@ def get_session_face_embedding(
     return embedding or None
 
 
+def cache_session_face_embedding(
+    class_session_id: int,
+    email: str,
+    embedding: List[float],
+) -> None:
+    if not embedding:
+        return
+    key = _session_embeddings_key(class_session_id)
+    redis_client.hset(
+        key,
+        email.lower(),
+        json.dumps({"embedding": embedding}).encode("utf-8"),
+    )
+    redis_client.expire(key, SESSION_TTL_SECONDS)
+
+
 def has_session_face_embedding(class_session_id: int, email: str) -> bool:
     return redis_client.hexists(
         _session_embeddings_key(class_session_id),
