@@ -17,9 +17,23 @@ def env_bool(name: str, default: bool = True) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
 ENABLE_ANTI_SPOOF = env_bool("ENABLE_ANTI_SPOOF", True)
 ENABLE_LOCATION_DETECTION = env_bool("ENABLE_LOCATION_DETECTION", True)
 DEFER_ML_REVIEW = env_bool("DEFER_ML_REVIEW", True)
+REVIEW_CONCURRENCY = env_int("REVIEW_CONCURRENCY", 4)
+# Load-test routes: seed N synthetic marks (same JPEG) for deferred spoof + DINO review benchmarks.
+ENABLE_LOAD_TEST_SEED = env_bool("ENABLE_LOAD_TEST_SEED", False)
 
 
 def location_attendance_status(

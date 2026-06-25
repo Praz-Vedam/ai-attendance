@@ -23,6 +23,10 @@ DEFAULT_POLL_STUDENT_TOKENS = LOAD_TESTS_DIR / "student_tokens_poll.txt"
 DEFAULT_LMS_BASE = "http://localhost:9090"
 FACE_API_DIM = 128
 
+# Keys set in the parent shell (e.g. MARK_USERS=0 from run_ml_review_test.sh) must
+# not be overwritten when secrets.env is loaded.
+_SHELL_ENV_KEYS = frozenset(os.environ)
+
 
 def load_dotenv(path: Path) -> None:
     if not path.is_file():
@@ -46,7 +50,10 @@ def load_secrets_env(path: Path = SECRETS_ENV) -> None:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, _, value = stripped.partition("=")
-        os.environ[key.strip()] = value.strip().strip('"').strip("'")
+        key = key.strip()
+        if key in _SHELL_ENV_KEYS:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
 
 
 def format_env_value(value: str) -> str:
@@ -567,6 +574,103 @@ def start_attendance_session(
     return response.json()
 
 
+def get_attendance_status(
+    teacher_token: str,
+    class_session_id: int,
+) -> Dict[str, Any]:
+    response = httpx.get(
+        f"{ai_attendance_base()}/lms/attendance/status",
+        headers={"Authorization": f"Bearer {teacher_token}"},
+        params={"class_session_id": class_session_id},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def post_student_mark(
+    student_token: str,
+    class_session_id: int,
+    *,
+    embedding_json: str,
+    image_bytes: bytes,
+) -> Dict[str, Any]:
+    response = httpx.post(
+        f"{ai_attendance_base()}/lms/attendance/mark",
+        headers={"Authorization": f"Bearer {student_token}"},
+        data={
+            "class_session_id": str(class_session_id),
+            "face_embedding": embedding_json,
+        },
+        files={"file": ("attendance.jpg", image_bytes, "image/jpeg")},
+        timeout=120.0,
+    )
+    if response.status_code >= 400:
+        try:
+            return response.json()
+        except ValueError:
+            response.raise_for_status()
+    return response.json()
+
+
+def seed_review_marks(
+    class_session_id: int,
+    student_tokens: list[str],
+    *,
+    embeddings: Dict[str, str],
+    image_bytes: bytes,
+    target_count: int,
+    concurrency: int = 20,
+) -> tuple[int, int, list[str]]:
+    """
+    POST /lms/attendance/mark for up to target_count distinct enrolled students.
+
+    Each successful mark stores a JPEG snapshot for deferred spoof + DINO review.
+    Returns (success_count, failure_count, sample_errors).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    unique_tokens = [token for token in dict.fromkeys(student_tokens) if token]
+    tokens_to_mark = unique_tokens[: max(target_count, 0)]
+    if not tokens_to_mark:
+        return 0, 0, ["no student tokens available"]
+
+    successes = 0
+    failures = 0
+    errors: list[str] = []
+
+    def _mark_one(token: str) -> tuple[bool, str]:
+        embedding_json = embeddings.get(token)
+        if not embedding_json:
+            return False, "missing embedding"
+        try:
+            result = post_student_mark(
+                token,
+                class_session_id,
+                embedding_json=embedding_json,
+                image_bytes=image_bytes,
+            )
+        except httpx.HTTPError as exc:
+            return False, str(exc)
+        if result.get("success"):
+            return True, ""
+        return False, str(result.get("message") or "mark failed")
+
+    workers = max(1, min(concurrency, len(tokens_to_mark)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_mark_one, token): token for token in tokens_to_mark}
+        for future in as_completed(futures):
+            ok, message = future.result()
+            if ok:
+                successes += 1
+            else:
+                failures += 1
+                if message and len(errors) < 5:
+                    errors.append(message)
+
+    return successes, failures, errors
+
+
 def submit_attendance_session(teacher_token: str, class_session_id: int) -> Dict[str, Any]:
     response = httpx.post(
         f"{ai_attendance_base()}/lms/attendance/submit",
@@ -577,6 +681,54 @@ def submit_attendance_session(teacher_token: str, class_session_id: int) -> Dict
         json={"class_session_id": class_session_id},
         timeout=120.0,
     )
+    response.raise_for_status()
+    return response.json()
+
+
+def seed_synthetic_marks_via_api(
+    teacher_token: str,
+    class_session_id: int,
+    *,
+    count: int,
+    image_bytes: bytes,
+    replace: bool = True,
+) -> Dict[str, Any]:
+    response = httpx.post(
+        f"{ai_attendance_base()}/lms/attendance/load-test/seed-marks",
+        headers={"Authorization": f"Bearer {teacher_token}"},
+        data={
+            "class_session_id": str(class_session_id),
+            "count": str(count),
+            "replace": "true" if replace else "false",
+        },
+        files={"file": ("attendance.jpg", image_bytes, "image/jpeg")},
+        timeout=180.0,
+    )
+    if response.status_code == 404:
+        raise RuntimeError(
+            "Load-test seed route not found — set ENABLE_LOAD_TEST_SEED=true on the server"
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+def submit_session_for_review_load_test(
+    teacher_token: str,
+    class_session_id: int,
+) -> Dict[str, Any]:
+    response = httpx.post(
+        f"{ai_attendance_base()}/lms/attendance/load-test/submit-for-review",
+        headers={
+            "Authorization": f"Bearer {teacher_token}",
+            "Content-Type": "application/json",
+        },
+        json={"class_session_id": class_session_id},
+        timeout=60.0,
+    )
+    if response.status_code == 404:
+        raise RuntimeError(
+            "Load-test submit route not found — set ENABLE_LOAD_TEST_SEED=true on the server"
+        )
     response.raise_for_status()
     return response.json()
 

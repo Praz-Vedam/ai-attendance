@@ -12,18 +12,19 @@ fi
 
 pip install -q -r "$ROOT/load_tests/requirements.txt"
 
-export LOCUST_USERS="${LOCUST_USERS:-300}"
-export MARK_USERS="${MARK_USERS:-100}"
-export POLL_USERS="${POLL_USERS:-$((LOCUST_USERS - MARK_USERS))}"
+export MARK_USERS="${MARK_USERS:-150}"
+export POLL_USERS="${POLL_USERS:-150}"
+export LOCUST_USERS="${LOCUST_USERS:-150}"
+TOTAL_USERS=$((POLL_USERS + MARK_USERS))
+if [[ -z "${MARK_SPAWN_RATE:-}" ]]; then
+  MARK_SPAWN_RATE="${TOTAL_USERS}"
+fi
+export MARK_SPAWN_RATE
 export MARK_WINDOW_SECONDS="${MARK_WINDOW_SECONDS:-15}"
 export MARK_DISTRIBUTION="${MARK_DISTRIBUTION:-burst}"
 export MARK_BURST_SECONDS="${MARK_BURST_SECONDS:-3}"
 export MARK_RUN_TIME="${MARK_RUN_TIME:-2m}"
 export LOCUST_RUN_TIME="${LOCUST_RUN_TIME:-$MARK_RUN_TIME}"
-if [[ -z "${MARK_SPAWN_RATE:-}" ]]; then
-  MARK_SPAWN_RATE="${LOCUST_USERS}"
-fi
-export MARK_SPAWN_RATE
 REPORT_HTML="${LOAD_TEST_REPORT_HTML:-$ROOT/load_tests/mark_report.html}"
 SUMMARY_HTML="${LOAD_TEST_SUMMARY_HTML:-$ROOT/load_tests/mark_load_test_report.html}"
 CSV_PREFIX="${LOAD_TEST_CSV_PREFIX:-$ROOT/load_tests/mark_session}"
@@ -43,7 +44,7 @@ export LOCUST_HOST="${LOCUST_HOST:-http://127.0.0.1:8000}"
 
 echo ""
 echo "=== Mark session load test ==="
-echo "  Total users:  ${LOCUST_USERS} (${POLL_USERS} polling + ${MARK_USERS} marking)"
+echo "  Total users:  ${TOTAL_USERS} (${POLL_USERS} polling + ${MARK_USERS} marking)"
 echo "  Mark window:  ${MARK_USERS} marks within ${MARK_WINDOW_SECONDS}s (${MARK_DISTRIBUTION})"
 echo "  Spawn rate:   ${MARK_SPAWN_RATE}/s"
 echo "  Run time:     ${LOCUST_RUN_TIME}"
@@ -57,7 +58,7 @@ LOCUST_ARGS=(
   -f "$ROOT/load_tests/mark_session_locustfile.py"
   --host="$LOCUST_HOST"
   --headless
-  -u "$LOCUST_USERS"
+  -u "$TOTAL_USERS"
   -r "$MARK_SPAWN_RATE"
   --run-time "$LOCUST_RUN_TIME"
   --html "$REPORT_HTML"

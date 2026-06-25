@@ -30,7 +30,7 @@ from face_matching import (
     is_face_api_embedding,
     parse_client_embedding,
 )
-from ml_config import DEFER_ML_REVIEW, location_attendance_status
+from ml_config import DEFER_ML_REVIEW, ENABLE_LOAD_TEST_SEED, location_attendance_status
 from lms_redis_store import (
     add_mark,
     add_mark_failure,
@@ -54,6 +54,7 @@ from lms_redis_store import (
     list_mark_failures,
     list_marks,
     mark_session_submitted,
+    seed_synthetic_marks,
 )
 from session_review import schedule_session_review
 
@@ -596,6 +597,69 @@ def register_routes(
             "marked_count": len(marks),
         }
 
+    @app_router.post("/attendance/load-test/seed-marks")
+    async def lms_load_test_seed_marks(
+        class_session_id: int = Form(...),
+        count: int = Form(100),
+        replace: bool = Form(True),
+        file: UploadFile = File(...),
+        _token: str = Depends(require_lms_token),
+        _auth: Dict[str, Any] = Depends(require_lms_auth),
+    ):
+        if not ENABLE_LOAD_TEST_SEED:
+            raise HTTPException(status_code=404, detail="Load-test seed routes are disabled")
+
+        session = get_session(class_session_id)
+        if not session:
+            return {"success": False, "message": "No attendance session found in Redis"}
+
+        if count < 1 or count > 500:
+            return {"success": False, "message": "count must be between 1 and 500"}
+
+        image_bytes = await file.read()
+        if len(image_bytes) < 1024:
+            return {"success": False, "message": "JPEG snapshot must be at least 1 KB"}
+
+        seeded = seed_synthetic_marks(
+            class_session_id,
+            count=count,
+            snapshot_bytes=image_bytes,
+            replace=replace,
+        )
+        return {
+            "success": True,
+            "message": f"Seeded {seeded} synthetic mark(s) with the same snapshot",
+            "marked_count": seeded,
+            "class_session_id": class_session_id,
+        }
+
+    @app_router.post("/attendance/load-test/submit-for-review")
+    async def lms_load_test_submit_for_review(
+        payload: LmsAttendanceSessionRequest,
+        _token: str = Depends(require_lms_token),
+        _auth: Dict[str, Any] = Depends(require_lms_auth),
+    ):
+        """Mark session submitted in Redis only (no LMS bulk update) — for ML review benchmarks."""
+        if not ENABLE_LOAD_TEST_SEED:
+            raise HTTPException(status_code=404, detail="Load-test seed routes are disabled")
+
+        class_session_id = payload.class_session_id
+        session = get_session(class_session_id)
+        if not session:
+            return {"success": False, "message": "No attendance session found in Redis"}
+
+        marks = list_marks(class_session_id)
+        if not marks:
+            return {"success": False, "message": "No marks to submit"}
+
+        mark_session_submitted(class_session_id)
+        return {
+            "success": True,
+            "message": f"Session marked submitted ({len(marks)} mark(s)) — ready for review",
+            "marked_count": len(marks),
+            "class_session_id": class_session_id,
+        }
+
     @app_router.get("/attendance/status")
     async def lms_attendance_status(
         class_session_id: int = Query(...),
@@ -624,6 +688,8 @@ def register_routes(
             "submitted": bool(session.get("submitted")),
             "review_status": session.get("review_status"),
             "review_error": session.get("review_error"),
+            "review_started_at": session.get("review_started_at"),
+            "review_completed_at": session.get("review_completed_at"),
             "flagged_count": session.get("flagged_count"),
             "rejected_count": session.get("rejected_count"),
             "started_at": session.get("started_at"),

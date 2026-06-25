@@ -32,7 +32,7 @@ STUDENT_TOKENS_FILE = LOAD_TESTS_DIR / "student_tokens.txt"
 FACE_FIXTURE = LOAD_TESTS_DIR / "fixtures" / "sample.jpg"
 
 DEFAULT_LMS_BASE = "http://localhost:9090"
-DEFAULT_STUDENT_TOKEN_COPIES = 300
+DEFAULT_STUDENT_TOKEN_COPIES = 150
 
 
 def _load_dotenv(path: Path) -> None:

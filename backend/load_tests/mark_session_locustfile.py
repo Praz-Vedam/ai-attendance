@@ -1,7 +1,7 @@
 """
 Mark-attendance burst test — one POST per marking user.
 
-Default: 300 users (200 polling + 100 marking) / 15s burst / 2m run.
+Default: 150 polling + 150 marking (300 total) / 15s burst / 2m run.
 Run via: ./load_tests/run_mark_session_test.sh
 """
 

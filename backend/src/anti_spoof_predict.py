@@ -55,15 +55,14 @@ class AntiSpoofPredict(Detection):
         super(AntiSpoofPredict, self).__init__()
         self.device = torch.device("cuda:{}".format(device_id)
                                    if torch.cuda.is_available() else "cpu")
+        self._models: dict[str, torch.nn.Module] = {}
 
-    def _load_model(self, model_path):
-        # define model
+    def _build_model(self, model_path: str) -> torch.nn.Module:
         model_name = os.path.basename(model_path)
         h_input, w_input, model_type, _ = parse_model_name(model_name)
-        self.kernel_size = get_kernel(h_input, w_input,)
-        self.model = MODEL_MAPPING[model_type](conv6_kernel=self.kernel_size).to(self.device)
+        kernel_size = get_kernel(h_input, w_input)
+        model = MODEL_MAPPING[model_type](conv6_kernel=kernel_size).to(self.device)
 
-        # load model weight
         state_dict = torch.load(model_path, map_location=self.device)
         keys = iter(state_dict)
         first_layer_name = keys.__next__()
@@ -73,10 +72,26 @@ class AntiSpoofPredict(Detection):
             for key, value in state_dict.items():
                 name_key = key[7:]
                 new_state_dict[name_key] = value
-            self.model.load_state_dict(new_state_dict)
+            model.load_state_dict(new_state_dict)
         else:
-            self.model.load_state_dict(state_dict)
-        return None
+            model.load_state_dict(state_dict)
+
+        model.eval()
+        return model
+
+    def preload_models(self, model_dir: str) -> None:
+        for model_name in sorted(os.listdir(model_dir)):
+            if not model_name.endswith(".pth"):
+                continue
+            model_path = os.path.join(model_dir, model_name)
+            self._models[model_path] = self._build_model(model_path)
+
+    def _get_model(self, model_path: str) -> torch.nn.Module:
+        model = self._models.get(model_path)
+        if model is None:
+            model = self._build_model(model_path)
+            self._models[model_path] = model
+        return model
 
     def predict(self, img, model_path):
         test_transform = trans.Compose([
@@ -84,10 +99,9 @@ class AntiSpoofPredict(Detection):
         ])
         img = test_transform(img)
         img = img.unsqueeze(0).to(self.device)
-        self._load_model(model_path)
-        self.model.eval()
+        model = self._get_model(model_path)
         with torch.no_grad():
-            result = self.model.forward(img)
+            result = model.forward(img)
             result = F.softmax(result).cpu().numpy()
         return result
 

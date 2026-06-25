@@ -167,6 +167,59 @@ def list_marks(class_session_id: int) -> List[Dict[str, Any]]:
     return marks
 
 
+def clear_session_marks(class_session_id: int) -> None:
+    """Remove all marks and JPEG snapshots for a class session."""
+    pipe = redis_client.pipeline()
+    pipe.delete(_marks_key(class_session_id))
+    pattern = f"lms:attendance:snapshot:{class_session_id}:*"
+    for key in redis_client.scan_iter(match=pattern):
+        pipe.delete(key)
+    pipe.execute()
+
+
+def seed_synthetic_marks(
+    class_session_id: int,
+    *,
+    count: int,
+    snapshot_bytes: bytes,
+    email_prefix: str = "loadtest",
+    replace: bool = True,
+) -> int:
+    """
+    Insert N synthetic present marks, each with the same JPEG snapshot bytes.
+
+    Used by load-test benchmarks for deferred spoof + DINO review throughput.
+    """
+    if count <= 0:
+        return 0
+    if replace:
+        clear_session_marks(class_session_id)
+
+    marked_at = datetime.now(timezone.utc).isoformat()
+    marks_key = _marks_key(class_session_id)
+    pipe = redis_client.pipeline()
+
+    for index in range(count):
+        email = f"{email_prefix}{index + 1:03d}@loadtest.local"
+        record = {
+            "email": email,
+            "name": f"Load Test {index + 1}",
+            "marked_at": marked_at,
+            "status": "Present",
+            "review_status": "pending",
+            "reason": None,
+            "has_snapshot": True,
+        }
+        pipe.hset(marks_key, email, json.dumps(record).encode("utf-8"))
+        snap_key = _snapshot_key(class_session_id, email)
+        pipe.set(snap_key, snapshot_bytes)
+        pipe.expire(snap_key, SESSION_TTL_SECONDS)
+
+    pipe.expire(marks_key, SESSION_TTL_SECONDS)
+    pipe.execute()
+    return count
+
+
 def get_snapshot(class_session_id: int, email: str) -> Optional[bytes]:
     return redis_client.get(_snapshot_key(class_session_id, email))
 

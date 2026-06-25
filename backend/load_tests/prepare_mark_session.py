@@ -46,8 +46,8 @@ from env_util import (  # noqa: E402
 STUDENT_MARK_TOKENS_FILE = DEFAULT_MARK_STUDENT_TOKENS
 STUDENT_POLL_TOKENS_FILE = DEFAULT_POLL_STUDENT_TOKENS
 STUDENT_EMBEDDINGS_FILE = LOAD_TESTS_DIR / "student_embeddings.json"
-DEFAULT_MARK_USERS = 100
-DEFAULT_LOCUST_USERS = 300
+DEFAULT_MARK_USERS = 150
+DEFAULT_POLL_USERS = 150
 
 
 def _resolve_student_tokens(class_session_id: int) -> list[str]:
@@ -64,9 +64,7 @@ def main() -> int:
 
     existing = parse_env_file(LOCAL_ENV)
     mark_users = int(os.getenv("MARK_USERS", str(DEFAULT_MARK_USERS)))
-    locust_users = int(os.getenv("LOCUST_USERS", str(DEFAULT_LOCUST_USERS)))
-    if locust_users < mark_users:
-        locust_users = mark_users
+    poll_users = int(os.getenv("POLL_USERS", str(DEFAULT_POLL_USERS)))
 
     class_session_id = int(
         os.getenv("CLASS_SESSION_ID") or existing.get("CLASS_SESSION_ID") or 0
@@ -115,6 +113,27 @@ def main() -> int:
         print(f"[prepare_mark_session] Failed to start attendance session: {exc}", file=sys.stderr)
         return 1
 
+    if mark_users == 0 and poll_users == 0:
+        face_path = existing.get("FACE_IMAGE_PATH") or str(
+            LOAD_TESTS_DIR / "fixtures" / "sample.jpg"
+        )
+        env_values = {
+            **existing,
+            "CLASS_SESSION_ID": str(class_session_id),
+            "FACE_IMAGE_PATH": face_path,
+            "MARK_USERS": "0",
+            "POLL_USERS": "0",
+            "LOCUST_USERS": "0",
+            "LOCUST_HOST": existing.get("LOCUST_HOST", ai_attendance_base()),
+            "TEACHER_TOKEN": teacher_token,
+        }
+        write_env_file(LOCAL_ENV, env_values)
+        print(
+            f"[prepare_mark_session] Session {class_session_id} ready "
+            "(no student tokens — mark/poll users are 0)"
+        )
+        return 0
+
     access_tokens = _resolve_student_tokens(class_session_id)
     if not access_tokens:
         print(
@@ -129,7 +148,7 @@ def main() -> int:
         mark_tokens, poll_tokens = assign_mark_and_poll_tokens(
             access_tokens,
             mark_users=mark_users,
-            poll_users=max(locust_users - mark_users, 0),
+            poll_users=poll_users,
             allow_duplicate_marks=allow_duplicate_mark_tokens(),
         )
     except ValueError as exc:
@@ -174,8 +193,8 @@ def main() -> int:
         "STUDENT_EMBEDDINGS_FILE": str(STUDENT_EMBEDDINGS_FILE),
         "FACE_IMAGE_PATH": face_path,
         "MARK_USERS": str(mark_users),
-        "LOCUST_USERS": str(locust_users),
-        "POLL_USERS": str(max(locust_users - mark_users, 0)),
+        "POLL_USERS": str(poll_users),
+        "LOCUST_USERS": str(mark_users + poll_users),
         "MARK_WINDOW_SECONDS": os.getenv("MARK_WINDOW_SECONDS", "15").strip(),
         "MARK_DISTRIBUTION": os.getenv("MARK_DISTRIBUTION", "burst").strip(),
         "MARK_BURST_SECONDS": os.getenv("MARK_BURST_SECONDS", "3").strip(),

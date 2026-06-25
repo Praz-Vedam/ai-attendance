@@ -1,9 +1,9 @@
 """
 Sustained throughput load test — mixed student + teacher traffic.
 
-Default scenario (300 users / 2 min):
-  - 200 students poll GET /lms/attendance/student-status continuously
-  - 100 students POST /lms/attendance/mark in a 15s burst (face-api + JPEG)
+Default scenario (150 polling + 150 marking / 2 min):
+  - 150 students poll GET /lms/attendance/student-status continuously
+  - 150 students POST /lms/attendance/mark in a 15s burst (face-api + JPEG)
   - 1 teacher polls roster + session status
 
 Run via: ./load_tests/run_throughput_test.sh

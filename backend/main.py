@@ -22,7 +22,11 @@ from face_matching import (
     compare_embeddings,
     is_face_api_embedding,
 )
-from ml_config import ENABLE_ANTI_SPOOF, ENABLE_LOCATION_DETECTION, post_mark_review_status
+from ml_config import (
+    ENABLE_ANTI_SPOOF,
+    ENABLE_LOCATION_DETECTION,
+    post_mark_review_status,
+)
 
 from src.anti_spoof_predict import AntiSpoofPredict
 from src.generate_patches import CropImage
@@ -92,7 +96,7 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     get_lms_client()
-    init_review_worker(run_post_mark_review)
+    init_review_worker(review_snapshots_batch)
     await start_review_poller()
     yield
     await shutdown_review_poller()
@@ -138,6 +142,7 @@ logging.info(
 )
 
 model_dir = "./resources/anti_spoof_models"
+ml_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 anti_spoof: Optional[AntiSpoofPredict] = None
 location_processor = None
 location_model = None
@@ -146,7 +151,11 @@ location_classifier = None
 if ENABLE_ANTI_SPOOF:
     print("Loading SilentFace anti-spoofing models...")
     anti_spoof = AntiSpoofPredict(0)
-    print("SilentFace models loaded")
+    anti_spoof.preload_models(model_dir)
+    print(
+        f"SilentFace models loaded ({anti_spoof.device}, "
+        f"{len(anti_spoof._models)} model(s))"
+    )
 else:
     print("Anti-spoof disabled (ENABLE_ANTI_SPOOF=false)")
 
@@ -157,11 +166,11 @@ if ENABLE_LOCATION_DETECTION:
     )
     location_model = AutoModel.from_pretrained(
         "facebook/dinov2-base"
-    )
+    ).to(ml_device).eval()
     location_classifier = joblib.load(
         "location_model.pkl"
     )
-    print("Location Classifier Loaded")
+    print(f"Location Classifier Loaded ({ml_device})")
 else:
     print("Location detection disabled (ENABLE_LOCATION_DETECTION=false)")
 
@@ -207,18 +216,19 @@ def check_spoof(image_bytes):
     image_np = np.array(image)
 
     prediction = np.zeros((1, 3))
+    bbox = anti_spoof.get_bbox(image_np)
+    cropper = CropImage()
 
-    for model_name in os.listdir(model_dir):
-
+    for model_name in sorted(
+        name for name in os.listdir(model_dir) if name.endswith(".pth")
+    ):
         h_input, w_input, model_type, scale = (
             parse_model_name(model_name)
         )
 
-        cropper = CropImage()
-
         param = {
             "org_img": image_np,
-            "bbox": anti_spoof.get_bbox(image_np),
+            "bbox": bbox,
             "scale": scale,
             "out_w": w_input,
             "out_h": h_input,
@@ -241,64 +251,49 @@ def check_spoof(image_bytes):
     return False, float(confidence)
 
 
-def get_location_embedding(image_bytes):
-    image = Image.open(
-        io.BytesIO(image_bytes)
-    ).convert("RGB")
+def get_location_embeddings_batch(image_bytes_list: list[bytes]) -> np.ndarray:
+    if not image_bytes_list:
+        return np.empty((0, 0))
 
-    inputs = location_processor(
-        images=image,
-        return_tensors="pt"
-    )
+    images = [
+        Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        for image_bytes in image_bytes_list
+    ]
+    inputs = location_processor(images=images, return_tensors="pt")
+    inputs = {key: value.to(ml_device) for key, value in inputs.items()}
 
     with torch.no_grad():
-        outputs = location_model(
-            **inputs
-        )
+        outputs = location_model(**inputs)
 
-    embedding = (
-        outputs.last_hidden_state
-        .mean(dim=1)
-        .squeeze()
-        .numpy()
-    )
+    return outputs.last_hidden_state.mean(dim=1).cpu().numpy()
 
-    return embedding
+
+def detect_locations_batch(image_bytes_list: list[bytes]) -> list[dict]:
+    if not ENABLE_LOCATION_DETECTION:
+        return [
+            {"location": None, "confidence": None}
+            for _ in image_bytes_list
+        ]
+
+    if not image_bytes_list:
+        return []
+
+    embeddings = get_location_embeddings_batch(image_bytes_list)
+    predictions = location_classifier.predict(embeddings)
+    probabilities = location_classifier.predict_proba(embeddings)
+
+    results = []
+    for prediction, probs in zip(predictions, probabilities):
+        confidence = float(max(probs))
+        results.append({
+            "location": CLASS_NAMES[prediction],
+            "confidence": confidence,
+        })
+    return results
 
 
 def detect_location(image_bytes):
-    if not ENABLE_LOCATION_DETECTION:
-        return {
-            "location": None,
-            "confidence": None,
-        }
-
-    embedding = get_location_embedding(
-        image_bytes
-    )
-
-    prediction = (
-        location_classifier
-        .predict([embedding])[0]
-    )
-
-    probabilities = (
-        location_classifier
-        .predict_proba([embedding])[0]
-    )
-
-    confidence = float(
-        max(probabilities)
-    )
-
-    location = CLASS_NAMES[
-        prediction
-    ]
-
-    return {
-        "location": location,
-        "confidence": confidence
-    }
+    return detect_locations_batch([image_bytes])[0]
 
 
 @app.get("/")
@@ -376,21 +371,35 @@ def verify_face_match_only(
     return result
 
 
+def review_snapshots_batch(
+    snapshots: list[bytes],
+    expected_classroom: Optional[str],
+) -> list[dict]:
+    spoof_results = [check_spoof(snapshot) for snapshot in snapshots]
+    location_results = detect_locations_batch(snapshots)
+
+    results = []
+    for (is_real, spoof_confidence), location_result in zip(
+        spoof_results,
+        location_results,
+    ):
+        status, reason = post_mark_review_status(
+            is_real,
+            location_result.get("location"),
+            expected_classroom,
+        )
+        results.append({
+            "spoof_confidence": spoof_confidence,
+            "location": location_result.get("location"),
+            "location_confidence": location_result.get("confidence"),
+            "status": status,
+            "reason": reason,
+        })
+    return results
+
+
 def run_post_mark_review(image_bytes: bytes, expected_classroom: Optional[str]) -> dict:
-    is_real, spoof_confidence = check_spoof(image_bytes)
-    location_result = detect_location(image_bytes)
-    status, reason = post_mark_review_status(
-        is_real,
-        location_result.get("location"),
-        expected_classroom,
-    )
-    return {
-        "spoof_confidence": spoof_confidence,
-        "location": location_result.get("location"),
-        "location_confidence": location_result.get("confidence"),
-        "status": status,
-        "reason": reason,
-    }
+    return review_snapshots_batch([image_bytes], expected_classroom)[0]
 
 
 register_lms_routes(

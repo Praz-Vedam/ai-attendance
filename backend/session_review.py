@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from lms_redis_store import (
     dequeue_session_review,
@@ -19,17 +19,22 @@ from lms_redis_store import (
     try_acquire_review_lock,
     update_mark,
 )
+from ml_config import REVIEW_CONCURRENCY
 
 logger = logging.getLogger(__name__)
 
-REVIEW_CONCURRENCY = 4
 _poller_task: Optional[asyncio.Task] = None
-_run_post_mark_review: Optional[Callable[..., Dict[str, Any]]] = None
+_review_snapshots_batch: Optional[
+    Callable[[List[bytes], Optional[str]], List[Dict[str, Any]]]
+] = None
 
 
-def init_review_worker(run_post_mark_review: Callable[..., Dict[str, Any]]) -> None:
-    global _run_post_mark_review
-    _run_post_mark_review = run_post_mark_review
+def init_review_worker(
+    review_snapshots_batch: Callable[[List[bytes], Optional[str]], List[Dict[str, Any]]],
+) -> None:
+    global _review_snapshots_batch
+    _review_snapshots_batch = review_snapshots_batch
+    logger.info("[review] concurrency=%s", REVIEW_CONCURRENCY)
 
 
 async def start_review_poller() -> None:
@@ -70,7 +75,7 @@ async def review_session(class_session_id: int, *, force: bool = False) -> None:
     if not try_acquire_review_lock(class_session_id):
         return
 
-    if _run_post_mark_review is None:
+    if _review_snapshots_batch is None:
         logger.error("[review] Worker not initialized for session %s", class_session_id)
         release_review_lock(class_session_id)
         return
@@ -81,31 +86,27 @@ async def review_session(class_session_id: int, *, force: bool = False) -> None:
         release_review_lock(class_session_id)
 
 
-async def _run_review(
+def _collect_marks_to_review(
     class_session_id: int,
-    session: Dict[str, Any],
+    marks: List[Dict[str, Any]],
     *,
-    force: bool = False,
-) -> None:
-    set_session_review_status(class_session_id, "in_progress")
-    expected_classroom = session.get("classroom")
-    marks = list_marks(class_session_id)
+    force: bool,
+) -> Tuple[List[Tuple[Dict[str, Any], bytes]], int, int]:
+    pending: List[Tuple[Dict[str, Any], bytes]] = []
     flagged_count = 0
     rejected_count = 0
-    semaphore = asyncio.Semaphore(REVIEW_CONCURRENCY)
 
-    async def review_one_mark(mark: Dict[str, Any]) -> None:
-        nonlocal flagged_count, rejected_count
+    for mark in marks:
         email = (mark.get("email") or "").lower()
         if not email:
-            return
+            continue
 
         if not force and mark.get("review_status") == "complete":
             if mark.get("status") == "Flagged":
                 flagged_count += 1
             elif mark.get("status") == "Rejected":
                 rejected_count += 1
-            return
+            continue
 
         snapshot = get_snapshot(class_session_id, email)
         if not snapshot:
@@ -118,43 +119,74 @@ async def _run_review(
                     "reason": mark.get("reason") or "Snapshot missing for review",
                 },
             )
-            return
+            continue
 
-        async with semaphore:
-            result = await asyncio.to_thread(
-                _run_post_mark_review,
-                snapshot,
+        pending.append((mark, snapshot))
+
+    return pending, flagged_count, rejected_count
+
+
+def _apply_review_result(
+    class_session_id: int,
+    mark: Dict[str, Any],
+    result: Dict[str, Any],
+) -> str:
+    email = (mark.get("email") or "").lower()
+    status = result.get("status", "Present")
+    update_mark(
+        class_session_id,
+        email,
+        {
+            "spoof_confidence": result.get("spoof_confidence"),
+            "location": result.get("location"),
+            "location_confidence": result.get("location_confidence"),
+            "status": status,
+            "reason": result.get("reason"),
+            "review_status": "complete",
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    logger.info(
+        "[review] mark complete session=%s email=%s status=%s",
+        class_session_id,
+        email,
+        status,
+    )
+    return status
+
+
+async def _run_review(
+    class_session_id: int,
+    session: Dict[str, Any],
+    *,
+    force: bool = False,
+) -> None:
+    set_session_review_status(class_session_id, "in_progress")
+    expected_classroom = session.get("classroom")
+    marks = list_marks(class_session_id)
+    pending, flagged_count, rejected_count = _collect_marks_to_review(
+        class_session_id,
+        marks,
+        force=force,
+    )
+
+    try:
+        for start in range(0, len(pending), REVIEW_CONCURRENCY):
+            chunk = pending[start : start + REVIEW_CONCURRENCY]
+            snapshots = [snapshot for _, snapshot in chunk]
+            results = await asyncio.to_thread(
+                _review_snapshots_batch,
+                snapshots,
                 expected_classroom,
             )
 
-        status = result.get("status", "Present")
-        if status == "Flagged":
-            flagged_count += 1
-        elif status == "Rejected":
-            rejected_count += 1
+            for (mark, _), result in zip(chunk, results):
+                status = _apply_review_result(class_session_id, mark, result)
+                if status == "Flagged":
+                    flagged_count += 1
+                elif status == "Rejected":
+                    rejected_count += 1
 
-        update_mark(
-            class_session_id,
-            email,
-            {
-                "spoof_confidence": result.get("spoof_confidence"),
-                "location": result.get("location"),
-                "location_confidence": result.get("location_confidence"),
-                "status": status,
-                "reason": result.get("reason"),
-                "review_status": "complete",
-                "reviewed_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        logger.info(
-            "[review] mark complete session=%s email=%s status=%s",
-            class_session_id,
-            email,
-            status,
-        )
-
-    try:
-        await asyncio.gather(*(review_one_mark(mark) for mark in marks))
         set_session_review_status(
             class_session_id,
             "complete",
