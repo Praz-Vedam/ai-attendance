@@ -19,7 +19,7 @@ from lms_redis_store import (
     try_acquire_review_lock,
     update_mark,
 )
-from ml_config import REVIEW_CONCURRENCY
+from ml_config import REVIEW_CONCURRENCY, apply_ip_flag_to_status
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,12 @@ def _apply_review_result(
 ) -> str:
     email = (mark.get("email") or "").lower()
     status = result.get("status", "Present")
+    reason = result.get("reason")
+    status, reason = apply_ip_flag_to_status(
+        status,
+        reason,
+        ip_flagged=bool(mark.get("ip_flagged")),
+    )
     update_mark(
         class_session_id,
         email,
@@ -141,7 +147,7 @@ def _apply_review_result(
             "location": result.get("location"),
             "location_confidence": result.get("location_confidence"),
             "status": status,
-            "reason": result.get("reason"),
+            "reason": reason,
             "review_status": "complete",
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
         },

@@ -36,6 +36,37 @@ REVIEW_CONCURRENCY = env_int("REVIEW_CONCURRENCY", 4)
 ENABLE_LOAD_TEST_SEED = env_bool("ENABLE_LOAD_TEST_SEED", False)
 
 
+IP_MISMATCH_REASON = "IP mismatch"
+
+
+def ip_mark_fields(
+    teacher_ip: Optional[str],
+    student_ip: Optional[str],
+) -> Tuple[bool, bool, Optional[str]]:
+    """Return (ip_match, ip_flagged, reason). Missing IPs are not flagged."""
+    if not teacher_ip or not student_ip:
+        return True, False, None
+    if teacher_ip == student_ip:
+        return True, False, None
+    return False, True, IP_MISMATCH_REASON
+
+
+def apply_ip_flag_to_status(
+    status: str,
+    reason: Optional[str],
+    *,
+    ip_flagged: bool,
+) -> Tuple[str, Optional[str]]:
+    """Apply IP mismatch flag at mark time or after deferred ML review."""
+    if not ip_flagged:
+        return status, reason
+    if status == "Rejected":
+        return status, reason
+    if status == "Flagged":
+        return status, reason
+    return "Flagged", IP_MISMATCH_REASON
+
+
 def location_attendance_status(
     detected_location: Optional[str],
     expected_classroom: Optional[str],

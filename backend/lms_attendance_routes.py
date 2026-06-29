@@ -30,7 +30,13 @@ from face_matching import (
     is_face_api_embedding,
     parse_client_embedding,
 )
-from ml_config import DEFER_ML_REVIEW, ENABLE_LOAD_TEST_SEED, location_attendance_status
+from ml_config import (
+    DEFER_ML_REVIEW,
+    ENABLE_LOAD_TEST_SEED,
+    apply_ip_flag_to_status,
+    ip_mark_fields,
+    location_attendance_status,
+)
 from lms_redis_store import (
     add_mark,
     add_mark_failure,
@@ -130,6 +136,19 @@ def _public_mark(record: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(record)
     payload["has_snapshot"] = bool(record.get("has_snapshot"))
     return payload
+
+
+def _ip_metadata(
+    teacher_ip: Optional[str],
+    student_ip: Optional[str],
+) -> Dict[str, Any]:
+    ip_match, ip_flagged, _reason = ip_mark_fields(teacher_ip, student_ip)
+    return {
+        "student_ip": student_ip,
+        "teacher_ip": teacher_ip,
+        "ip_match": ip_match,
+        "ip_flagged": ip_flagged,
+    }
 
 
 def _campus_id_from_auth(auth: Dict[str, Any]) -> Optional[int]:
@@ -936,26 +955,28 @@ def register_routes(
         session = get_session(class_session_id) or {}
         student_ip = get_client_ip(request)
         teacher_ip = session.get("teacher_ip")
-        ip_match = ips_match(teacher_ip, student_ip)
-
+        ip_meta = _ip_metadata(teacher_ip, student_ip)
+        ip_flagged = ip_meta["ip_flagged"]
         marked_at = datetime.now(timezone.utc).isoformat()
 
         if DEFER_ML_REVIEW:
             if already_marked:
                 return _already_marked_response(result, verified=True)
 
+            status, reason = apply_ip_flag_to_status(
+                "Present",
+                None,
+                ip_flagged=ip_flagged,
+            )
             record = {
                 "email": email,
                 "name": name,
                 "marked_at": marked_at,
                 "similarity": result.get("similarity"),
-                "student_ip": student_ip,
-                "teacher_ip": teacher_ip,
-                "ip_match": ip_match,
-                "ip_flagged": bool(teacher_ip and student_ip and not ip_match),
-                "status": "Present",
+                **ip_meta,
+                "status": status,
                 "review_status": "pending",
-                "reason": None,
+                "reason": reason,
                 "has_snapshot": True,
             }
             add_mark(class_session_id, email, record, image_bytes)
@@ -967,9 +988,11 @@ def register_routes(
                 "message": "Attendance marked successfully",
                 "similarity": result.get("similarity"),
                 "marked_at": marked_at,
-                "status": "Present",
+                "status": status,
+                "reason": reason,
                 "review_status": "pending",
-                "ip_match": ip_match,
+                "ip_match": ip_meta["ip_match"],
+                "ip_flagged": ip_flagged,
             }
 
         location_result = detect_location(image_bytes)
@@ -979,6 +1002,11 @@ def register_routes(
         status, reason = location_attendance_status(
             detected_location,
             expected_classroom,
+        )
+        status, reason = apply_ip_flag_to_status(
+            status,
+            reason,
+            ip_flagged=ip_flagged,
         )
 
         if already_marked:
@@ -997,10 +1025,7 @@ def register_routes(
             "marked_at": marked_at,
             "similarity": result.get("similarity"),
             "spoof_confidence": result.get("spoof_confidence"),
-            "student_ip": student_ip,
-            "teacher_ip": teacher_ip,
-            "ip_match": ip_match,
-            "ip_flagged": bool(teacher_ip and student_ip and not ip_match),
+            **ip_meta,
             "location": detected_location,
             "location_confidence": location_result.get("confidence"),
             "status": status,
@@ -1021,4 +1046,6 @@ def register_routes(
             "marked_at": marked_at,
             "status": status,
             "reason": reason,
+            "ip_match": ip_meta["ip_match"],
+            "ip_flagged": ip_flagged,
         }
