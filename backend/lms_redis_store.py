@@ -468,16 +468,14 @@ def cache_session_face_roster(
         email = (student.get("email") or "").lower()
         if not email:
             continue
-        pipe.hset(
-            key,
-            email,
-            json.dumps(
-                {
-                    "email": student.get("email"),
-                    "hasFaceData": bool(student.get("hasFaceData")),
-                }
-            ).encode("utf-8"),
-        )
+        cached: Dict[str, Any] = {
+            "email": student.get("email"),
+            "hasFaceData": bool(student.get("hasFaceData")),
+        }
+        photo_url = student.get("photoUrl") or student.get("photo_url")
+        if isinstance(photo_url, str) and photo_url.strip():
+            cached["photoUrl"] = photo_url.strip()
+        pipe.hset(key, email, json.dumps(cached).encode("utf-8"))
     pipe.expire(key, SESSION_TTL_SECONDS)
     pipe.execute()
 

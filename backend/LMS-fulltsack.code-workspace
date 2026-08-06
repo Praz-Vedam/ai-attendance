@@ -11,6 +11,9 @@
         },
         {
             "path": "../../lms"
+        },
+        {
+            "path": "../../mobileStudentPortal"
         }
     ]
 }

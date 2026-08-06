@@ -365,6 +365,7 @@ def register_routes(
     @app_router.post("/face/register")
     async def lms_register_face(
         face_json: str = Form(...),
+        face_image: Optional[UploadFile] = File(None),
         token: str = Depends(require_lms_token),
         _auth: Dict[str, Any] = Depends(require_lms_auth),
     ):
@@ -373,8 +374,27 @@ def register_routes(
         except ValueError as exc:
             return {"success": False, "message": str(exc)}
 
+        image_bytes: Optional[bytes] = None
+        image_filename = "onboarding.jpg"
+        image_content_type = "image/jpeg"
+        if face_image is not None and face_image.filename:
+            content_type = (face_image.content_type or "").lower()
+            if content_type and not content_type.startswith("image/"):
+                return {"success": False, "message": "face_image must be an image file"}
+            image_bytes = await face_image.read()
+            if len(image_bytes) > 2 * 1024 * 1024:
+                return {"success": False, "message": "face_image must be 2 MB or smaller"}
+            image_filename = face_image.filename or image_filename
+            image_content_type = content_type or image_content_type
+
         try:
-            await register_face_embedding(token, embedding_list)
+            await register_face_embedding(
+                token,
+                embedding_list,
+                face_image=image_bytes,
+                face_image_filename=image_filename,
+                face_image_content_type=image_content_type,
+            )
         except ValueError as exc:
             return {"success": False, "message": str(exc)}
         except Exception:
@@ -778,8 +798,12 @@ def register_routes(
             email_lower = email.lower()
             face_meta = session_face_roster.get(email_lower)
             face_registered_at: Optional[str] = None
+            photo_url: Optional[str] = None
             if face_meta is not None:
                 face_registered = bool(face_meta.get("hasFaceData"))
+                raw_photo = face_meta.get("photoUrl") or face_meta.get("photo_url")
+                if isinstance(raw_photo, str) and raw_photo.strip():
+                    photo_url = raw_photo.strip()
                 if face_registered:
                     try:
                         face_status = await get_face_status_by_email(token, email)
@@ -801,6 +825,7 @@ def register_routes(
                 "attendance_id": row.get("attendanceId"),
                 "face_registered": face_registered,
                 "face_registered_at": face_registered_at,
+                "photo_url": photo_url,
                 "lms_status": row.get("status"),
                 "marked": email_lower in marks_by_email,
                 "mark": marks_by_email.get(email_lower),
@@ -815,6 +840,9 @@ def register_routes(
                     "attendance_id": None,
                     "face_registered": bool(meta.get("hasFaceData")),
                     "face_registered_at": None,
+                    "photo_url": (
+                        (meta.get("photoUrl") or meta.get("photo_url") or "").strip() or None
+                    ),
                     "lms_status": None,
                     "marked": email in marks_by_email,
                     "mark": marks_by_email.get(email),

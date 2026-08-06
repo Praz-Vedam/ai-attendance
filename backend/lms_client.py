@@ -221,14 +221,35 @@ async def get_face_status_by_email(token: str, email: str) -> Dict[str, Any]:
     return _unwrap_lms_response(response.json())
 
 
-async def register_face_embedding(token: str, embedding: List[float]) -> None:
+async def register_face_embedding(
+    token: str,
+    embedding: List[float],
+    *,
+    face_image: Optional[bytes] = None,
+    face_image_filename: str = "onboarding.jpg",
+    face_image_content_type: str = "image/jpeg",
+) -> None:
+    """Register face embedding with LMS; optionally persist onboarding photo.
+
+    LMS expects multipart/form-data with ``faceJson`` (+ optional ``faceImage``).
+    """
     face_json = json.dumps({"embedding": embedding})
+    # Use files= so httpx always sends multipart (LMS @RequestPart), even without image.
+    files: Dict[str, Any] = {
+        "faceJson": (None, face_json),
+    }
+    if face_image:
+        files["faceImage"] = (
+            face_image_filename,
+            face_image,
+            face_image_content_type or "image/jpeg",
+        )
+
     response = await _lms_request(
         "PUT",
         "/person/face",
         token,
-        headers={"Content-Type": "application/json"},
-        json={"faceJson": face_json},
+        files=files,
     )
     if response.status_code == 400:
         detail = response.json()
@@ -259,7 +280,7 @@ def parse_bulk_face_data_response(bulk: Dict[str, Any]) -> Dict[str, Any]:
     Parse LMS bulk face response into Redis-ready session data.
 
     LMS payload:
-      { "classSessionId": 1, "students": [{ "email", "hasFaceData", "faceJson" }] }
+      { "classSessionId": 1, "students": [{ "email", "hasFaceData", "faceJson", "photoUrl?" }] }
     """
     students = bulk.get("students") or []
     embeddings_by_email: Dict[str, List[float]] = {}
@@ -274,12 +295,14 @@ def parse_bulk_face_data_response(bulk: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         has_face_data = bool(student.get("hasFaceData"))
-        roster.append(
-            {
-                "email": email,
-                "hasFaceData": has_face_data,
-            }
-        )
+        photo_url = student.get("photoUrl") or student.get("photo_url")
+        entry: Dict[str, Any] = {
+            "email": email,
+            "hasFaceData": has_face_data,
+        }
+        if isinstance(photo_url, str) and photo_url.strip():
+            entry["photoUrl"] = photo_url.strip()
+        roster.append(entry)
 
         if not has_face_data:
             continue
